@@ -9,9 +9,54 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Carbon\Carbon;
+use DateTimeInterface;
 
 class AttendanceController extends Controller
 {
+    /** ---------------- Helpers (robust date/time handling) ---------------- */
+
+    private function toDateString($d, ?string $fallback = null): string
+    {
+        if ($d instanceof DateTimeInterface) return Carbon::instance($d)->toDateString();
+        $s = trim((string)$d);
+        // If looks like YYYY-MM-DD or YYYY-MM-DD HH:MM[:SS], take the date part
+        if (preg_match('/^\d{4}-\d{2}-\d{2}/', $s)) return substr($s, 0, 10);
+        return $fallback ?? now()->toDateString();
+    }
+
+    /**
+     * Accepts:
+     * - $time as "HH:MM[:SS]" or "YYYY-MM-DD HH:MM[:SS]" or DateTime
+     * - $fallbackDate as "YYYY-MM-DD" (string or DateTime)
+     * Returns a Carbon timestamp.
+     */
+    private function combineDateAndTime($fallbackDate, $time): Carbon
+    {
+        if ($time instanceof DateTimeInterface) {
+            return Carbon::instance($time);
+        }
+        $dateStr = $this->toDateString($fallbackDate);
+        $s = trim((string)$time);
+
+        if ($s === '') return Carbon::parse("$dateStr 00:00:00");
+
+        // full datetime?
+        if (preg_match('/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(:\d{2})?$/', $s)) {
+            return Carbon::parse($s);
+        }
+        // time only?
+        if (preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $s)) {
+            return Carbon::parse("$dateStr $s");
+        }
+        // date only?
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $s)) {
+            return Carbon::parse("$s 00:00:00");
+        }
+        // last resort: let Carbon guess
+        return Carbon::parse($s);
+    }
+
     /**
      * GET /api/attendances
      * Filters:
@@ -53,7 +98,7 @@ class AttendanceController extends Controller
                         'status'      => ucfirst($a->status ?? 'absent'),
                         'timeIn'      => $a->time_in ?: '-',
                         'timeOut'     => $a->time_out ?: '-',
-                        'date'        => $request->date,
+                        'date'        => $this->toDateString($request->date),
                     ];
                 });
             return ['data' => $rows];
@@ -65,7 +110,7 @@ class AttendanceController extends Controller
 
     /**
      * POST /api/attendances
-     * Behaviors (resourceful in one endpoint via payload):
+     * Behaviors (resourceful via payload):
      *  A) Start Attendance (pre-seed all students of class/date as 'absent'):
      *     { action:"start", class_id, date }
      *
@@ -105,41 +150,84 @@ class AttendanceController extends Controller
             return response()->json(['ok' => true, 'action' => 'start'], 201);
         }
 
-        // B) SCAN
+        // B) SCAN (hardened)
         if ($action === 'scan') {
             $data = $request->validate([
                 'class_id' => ['required', 'integer', 'exists:classes,id'],
                 'barcode'  => ['required', 'string'],
                 'date'     => ['nullable', 'date'],
             ]);
-            $date = $data['date'] ?? now()->toDateString();
 
             $student = Student::where('barcode', $data['barcode'])->first();
-            if (!$student) return response()->json(['ok' => false, 'message' => 'Student not found'], 404);
+            if (!$student) {
+                return response()->json(['ok' => false, 'message' => 'Student not found'], 404);
+            }
 
-            $att = Attendance::firstOrNew([
-                'type'       => 'class',
-                'class_id'   => $data['class_id'],
-                'student_id' => $student->id,
-                'log_date'   => $date,
-            ]);
+            $date = $data['date'] ?? now()->toDateString(); // used for locating the row
+            $MIN_GAP_SECONDS = 10; // adjust as needed
 
-            if (!$att->exists) {
-                $att->fill(['status' => 'present', 'time_in' => now()->format('H:i:s')])->save();
-                return ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
-            }
-            if (!$att->time_in) {
-                $att->time_in = now()->format('H:i:s');
-                $att->status  = 'present';
-                $att->save();
-                return ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
-            }
-            if (!$att->time_out) {
-                $att->time_out = now()->format('H:i:s');
-                $att->save();
-                return ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
-            }
-            return ['ok' => true, 'action' => 'noop', 'student' => $student->full_name];
+            $result = null;
+
+            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS) {
+                // Lock the row to avoid race conditions
+                $att = Attendance::where([
+                    'type'       => 'class',
+                    'class_id'   => $data['class_id'],
+                    'student_id' => $student->id,
+                    'log_date'   => $date,
+                ])->lockForUpdate()->first();
+
+                // No row yet (or absent pre-seed didn't exist): create and time-in
+                if (!$att) {
+                    $att = Attendance::create([
+                        'type'       => 'class',
+                        'class_id'   => $data['class_id'],
+                        'student_id' => $student->id,
+                        'log_date'   => $date,
+                        'status'     => 'present',
+                        'time_in'    => now()->format('H:i:s'),
+                    ]);
+                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
+                    return;
+                }
+
+                // If seeded as absent but not yet time_in -> mark time_in now
+                if (!$att->time_in) {
+                    $att->time_in = now()->format('H:i:s');
+                    $att->status  = 'present';
+                    $att->save();
+
+                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
+                    return;
+                }
+
+                // Already timed in but not yet timed out -> consider timeout (with min gap)
+                if (!$att->time_out) {
+                    $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
+                    $now  = now();
+
+                    if ($inAt->diffInSeconds($now) < $MIN_GAP_SECONDS) {
+                        $result = [
+                            'ok'      => true,
+                            'action'  => 'noop_cooldown',
+                            'student' => $student->full_name,
+                            'message' => "Please wait at least {$MIN_GAP_SECONDS}s before timing out.",
+                        ];
+                        return;
+                    }
+
+                    $att->time_out = $now->format('H:i:s');
+                    $att->save();
+
+                    $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
+                    return;
+                }
+
+                // Already has time_in and time_out
+                $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student->full_name];
+            });
+
+            return $result;
         }
 
         // C) MANUAL CREATE
@@ -215,7 +303,7 @@ class AttendanceController extends Controller
                     ucfirst($r->status ?? 'absent'),
                     $r->time_in,
                     $r->time_out,
-                    optional($r->log_date)->format('Y-m-d'),
+                    $this->toDateString($r->log_date),
                 ]);
             }
             fclose($out);
