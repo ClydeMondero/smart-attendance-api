@@ -1,14 +1,17 @@
 <?php
 
+use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AuthController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
+
+
+    Route::resource('attendances', AttendanceController::class);
 
     // Example: teacher-only resource
     Route::middleware('role:teacher')->group(function () {
@@ -17,6 +20,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Example: admin-only resource
     Route::middleware('role:admin')->group(function () {
+        Route::post('/register', [AuthController::class, 'register']);
+
         Route::get('/admin/dashboard', fn() => response()->json(['message' => 'Admin dashboard']));
     });
 });
