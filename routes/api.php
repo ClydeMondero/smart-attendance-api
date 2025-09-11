@@ -2,6 +2,9 @@
 
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\ClassController;
+use App\Http\Controllers\StudentController;
+use App\Models\SchoolClass;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -10,8 +13,11 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
 
+    Route::apiResource('classes', ClassController::class);
 
-    Route::resource('attendances', AttendanceController::class);
+    Route::apiResource('attendances', AttendanceController::class);
+
+    Route::apiResource('students', StudentController::class);
 
     // Example: teacher-only resource
     Route::middleware('role:teacher')->group(function () {

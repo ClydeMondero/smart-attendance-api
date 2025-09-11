@@ -2,40 +2,33 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Attendance extends Model
 {
-    use HasFactory, SoftDeletes;
-
     protected $fillable = [
-        'type',
-        'grade_level',
-        'section',
-        'teacher',
-        'school_year',
-        'status',
+        'type',        // 'class' | 'entry'
+        'class_id',    // nullable for gate entry
+        'student_id',  // nullable for gate entry
         'log_date',
-        'student_name',
-        'student_id',
+        'status',      // present|late|absent|excused|in|out
         'time_in',
         'time_out',
+        'note',
     ];
 
     protected $casts = [
         'log_date' => 'date',
+        'time_in'  => 'datetime:H:i:s',
+        'time_out' => 'datetime:H:i:s',
     ];
 
-    // Scopes for convenience
-    public function scopeClasses($query)
+    public function student()
     {
-        return $query->where('type', 'class');
+        return $this->belongsTo(\App\Models\Student::class);
     }
-
-    public function scopeEntries($query)
+    public function schoolClass()
     {
-        return $query->where('type', 'entry');
+        return $this->belongsTo(\App\Models\SchoolClass::class, 'class_id');
     }
 }

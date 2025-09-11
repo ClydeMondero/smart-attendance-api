@@ -3,149 +3,222 @@
 namespace App\Http\Controllers;
 
 use App\Models\Attendance;
+use App\Models\SchoolClass;
+use App\Models\Student;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AttendanceController extends Controller
 {
     /**
-     * List records with optional filters.
-     * Filters: ?type=class|entry, ?q=search, ?date_from=YYYY-MM-DD, ?date_to=YYYY-MM-DD
+     * GET /api/attendances
+     * Filters:
+     *  - type=class|entry
+     *  - class_id=ID (for class logs)
+     *  - date=YYYY-MM-DD  (exact)
+     *  - date_from=YYYY-MM-DD, date_to=YYYY-MM-DD
+     *  - q= search (student name or barcode or status)
+     * Response:
+     *  - If type=class & class_id & date given => compact table rows for your UI
+     *  - else => paginated attendances with relations
      */
     public function index(Request $request)
     {
-        $query = Attendance::query();
+        $q = Attendance::query()
+            ->when($request->type, fn($x, $t) => $x->where('type', $t))
+            ->when($request->class_id, fn($x, $cid) => $x->where('class_id', $cid))
+            ->when($request->date, fn($x, $d) => $x->whereDate('log_date', $d))
+            ->when($request->date_from, fn($x, $d) => $x->whereDate('log_date', '>=', $d))
+            ->when($request->date_to, fn($x, $d) => $x->whereDate('log_date', '<=', $d))
+            ->when($request->q, function ($x, $s) {
+                $x->where(function ($w) use ($s) {
+                    $w->whereHas('student', fn($st) => $st
+                        ->where('full_name', 'like', "%$s%")
+                        ->orWhere('barcode', 'like', "%$s%"))
+                        ->orWhere('status', 'like', "%$s%");
+                });
+            })
+            ->with(['student:id,full_name,barcode', 'schoolClass:id,grade_level,section']);
 
-        if ($type = $request->query('type')) {
-            $query->where('type', $type);
+        // Compact table shape for ClassAttendanceLog page
+        if ($request->type === 'class' && $request->filled(['class_id', 'date'])) {
+            $rows = $q->orderByRaw('COALESCE(time_in, "99:99:99") asc')
+                ->get()
+                ->map(function (Attendance $a) use ($request) {
+                    return [
+                        'id'          => (string) $a->id,
+                        'studentName' => $a->student?->full_name ?? '—',
+                        'status'      => ucfirst($a->status ?? 'absent'),
+                        'timeIn'      => $a->time_in ?: '-',
+                        'timeOut'     => $a->time_out ?: '-',
+                        'date'        => $request->date,
+                    ];
+                });
+            return ['data' => $rows];
         }
 
-        if ($q = $request->query('q')) {
-            $query->where(function ($sub) use ($q) {
-                $sub->where('grade_level', 'like', "%{$q}%")
-                    ->orWhere('section', 'like', "%{$q}%")
-                    ->orWhere('teacher', 'like', "%{$q}%")
-                    ->orWhere('student_name', 'like', "%{$q}%")
-                    ->orWhere('student_id', 'like', "%{$q}%");
-            });
-        }
-
-        if ($from = $request->query('date_from')) {
-            $query->whereDate('log_date', '>=', $from);
-        }
-        if ($to = $request->query('date_to')) {
-            $query->whereDate('log_date', '<=', $to);
-        }
-
-        $attendances = $query->latest('id')->paginate(15)->withQueryString();
-
-        // If you're returning views, swap this for: return view('attendances.index', compact('attendances'));
-        return response()->json($attendances);
-    }
-
-    /** Show create form (for Blade apps). */
-    public function create()
-    {
-        // return view('attendances.create');
-        return response()->json(['message' => 'Render create form here']);
-    }
-
-    /** Store a new attendance row (class or entry). */
-    public function store(Request $request)
-    {
-        $data = $this->validatedData($request);
-
-        $attendance = Attendance::create($data);
-
-        // return redirect()->route('attendances.show', $attendance)->with('status', 'Created!');
-        return response()->json($attendance, 201);
-    }
-
-    /** Display one row. */
-    public function show(Attendance $attendance)
-    {
-        // return view('attendances.show', compact('attendance'));
-        return response()->json($attendance);
-    }
-
-    /** Show edit form (for Blade apps). */
-    public function edit(Attendance $attendance)
-    {
-        // return view('attendances.edit', compact('attendance'));
-        return response()->json(['message' => 'Render edit form here', 'data' => $attendance]);
-    }
-
-    /** Update a row. */
-    public function update(Request $request, Attendance $attendance)
-    {
-        $data = $this->validatedData($request, updating: true);
-
-        $attendance->update($data);
-
-        // return redirect()->route('attendances.show', $attendance)->with('status', 'Updated!');
-        return response()->json($attendance);
-    }
-
-    /** Soft-delete a row. */
-    public function destroy(Attendance $attendance)
-    {
-        $attendance->delete();
-
-        // return redirect()->route('attendances.index')->with('status', 'Deleted!');
-        return response()->json(['deleted' => true]);
+        // Generic paginated result
+        return $q->latest('id')->paginate((int)$request->input('per_page', 15))->withQueryString();
     }
 
     /**
-     * Centralized validation for both "class" and "entry" types.
-     * - For type=class: require teacher/school_year/status (others optional)
-     * - For type=entry: require log_date/student_name/student_id/time_in (time_out optional)
+     * POST /api/attendances
+     * Behaviors (resourceful in one endpoint via payload):
+     *  A) Start Attendance (pre-seed all students of class/date as 'absent'):
+     *     { action:"start", class_id, date }
+     *
+     *  B) Scan (toggle in/out via barcode):
+     *     { action:"scan", class_id, date?, barcode }
+     *
+     *  C) Manual create (single row):
+     *     { type, class_id?, student_id?, log_date, status?, time_in?, time_out?, note? }
      */
-    protected function validatedData(Request $request, bool $updating = false): array
+    public function store(Request $request)
     {
-        $baseRules = [
-            'type'         => ['required', Rule::in(['class', 'entry'])],
+        $action = $request->input('action');
 
-            // shared
-            'grade_level'  => ['nullable', 'string', 'max:100'],
-            'section'      => ['nullable', 'string', 'max:100'],
+        // A) START
+        if ($action === 'start') {
+            $data = $request->validate([
+                'class_id' => ['required', 'integer', 'exists:classes,id'],
+                'date'     => ['required', 'date'],
+            ]);
 
-            // class fields
-            'teacher'      => ['nullable', 'string', 'max:255'],
-            'school_year'  => ['nullable', 'string', 'max:50'],
-            'status'       => ['nullable', Rule::in(['active', 'inactive'])],
+            DB::transaction(function () use ($data) {
+                $class = SchoolClass::findOrFail($data['class_id']);
+                $studentIds = $class->students()->pluck('id');
+                foreach ($studentIds as $sid) {
+                    Attendance::firstOrCreate(
+                        [
+                            'type'       => 'class',
+                            'class_id'   => $class->id,
+                            'student_id' => $sid,
+                            'log_date'   => $data['date'],
+                        ],
+                        ['status' => 'absent']
+                    );
+                }
+            });
 
-            // entry fields
-            'log_date'     => ['nullable', 'date'],
-            'student_name' => ['nullable', 'string', 'max:255'],
-            'student_id'   => ['nullable', 'string', 'max:100'],
-            'time_in'      => ['nullable', 'date_format:H:i'],
-            'time_out'     => ['nullable', 'date_format:H:i', 'after_or_equal:time_in'],
-        ];
-
-        // Add conditional requirements based on "type"
-        $conditionalRules = [
-            'teacher'      => ['required_if:type,class'],
-            'school_year'  => ['required_if:type,class'],
-            'status'       => ['required_if:type,class'],
-
-            'log_date'     => ['required_if:type,entry', 'date'],
-            'student_name' => ['required_if:type,entry'],
-            'student_id'   => ['required_if:type,entry'],
-            'time_in'      => ['required_if:type,entry', 'date_format:H:i'],
-            // time_out remains optional
-        ];
-
-        $rules = array_merge_recursive($baseRules, $conditionalRules);
-
-        $validated = $request->validate($rules);
-
-        // Optional: normalize strings (trim)
-        foreach (['grade_level', 'section', 'teacher', 'school_year', 'student_name', 'student_id'] as $k) {
-            if (isset($validated[$k]) && is_string($validated[$k])) {
-                $validated[$k] = trim($validated[$k]);
-            }
+            return response()->json(['ok' => true, 'action' => 'start'], 201);
         }
 
-        return $validated;
+        // B) SCAN
+        if ($action === 'scan') {
+            $data = $request->validate([
+                'class_id' => ['required', 'integer', 'exists:classes,id'],
+                'barcode'  => ['required', 'string'],
+                'date'     => ['nullable', 'date'],
+            ]);
+            $date = $data['date'] ?? now()->toDateString();
+
+            $student = Student::where('barcode', $data['barcode'])->first();
+            if (!$student) return response()->json(['ok' => false, 'message' => 'Student not found'], 404);
+
+            $att = Attendance::firstOrNew([
+                'type'       => 'class',
+                'class_id'   => $data['class_id'],
+                'student_id' => $student->id,
+                'log_date'   => $date,
+            ]);
+
+            if (!$att->exists) {
+                $att->fill(['status' => 'present', 'time_in' => now()->format('H:i:s')])->save();
+                return ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
+            }
+            if (!$att->time_in) {
+                $att->time_in = now()->format('H:i:s');
+                $att->status  = 'present';
+                $att->save();
+                return ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
+            }
+            if (!$att->time_out) {
+                $att->time_out = now()->format('H:i:s');
+                $att->save();
+                return ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
+            }
+            return ['ok' => true, 'action' => 'noop', 'student' => $student->full_name];
+        }
+
+        // C) MANUAL CREATE
+        $data = $request->validate([
+            'type'       => ['required', Rule::in(['class', 'entry'])],
+            'class_id'   => ['nullable', 'integer', 'exists:classes,id'],
+            'student_id' => ['nullable', 'integer', 'exists:students,id'],
+            'log_date'   => ['required', 'date'],
+            'status'     => ['nullable', Rule::in(['present', 'late', 'absent', 'excused', 'in', 'out'])],
+            'time_in'    => ['nullable', 'date_format:H:i'],
+            'time_out'   => ['nullable', 'date_format:H:i', 'after_or_equal:time_in'],
+            'note'       => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $attendance = Attendance::create($data);
+        return response()->json($attendance, 201);
+    }
+
+    /** GET /api/attendances/{attendance} */
+    public function show(Attendance $attendance)
+    {
+        return $attendance->load(['student:id,full_name,barcode', 'schoolClass:id,grade_level,section']);
+    }
+
+    /** PUT/PATCH /api/attendances/{attendance} */
+    public function update(Request $request, Attendance $attendance)
+    {
+        $data = $request->validate([
+            'status'   => ['nullable', Rule::in(['present', 'late', 'absent', 'excused', 'in', 'out'])],
+            'time_in'  => ['nullable', 'date_format:H:i'],
+            'time_out' => ['nullable', 'date_format:H:i', 'after_or_equal:time_in'],
+            'note'     => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $attendance->update($data);
+        return $attendance->fresh()->load('student:id,full_name,barcode');
+    }
+
+    /** DELETE /api/attendances/{attendance} */
+    public function destroy(Attendance $attendance)
+    {
+        $attendance->delete();
+        return response()->json(['deleted' => true]);
+    }
+
+    /** OPTIONAL: CSV export – /api/attendances/export?class_id=&date= */
+    public function export(Request $request): StreamedResponse
+    {
+        $request->validate([
+            'class_id' => ['required', 'integer', 'exists:classes,id'],
+            'date'     => ['required', 'date'],
+        ]);
+
+        $rows = Attendance::where('type', 'class')
+            ->where('class_id', $request->class_id)
+            ->whereDate('log_date', $request->date)
+            ->with('student:id,full_name,barcode')
+            ->orderBy('time_in')
+            ->get();
+
+        $headers = [
+            'Content-Type'        => 'text/csv',
+            'Content-Disposition' => 'attachment; filename="attendance_' . $request->class_id . '_' . $request->date . '.csv"',
+        ];
+
+        return response()->stream(function () use ($rows) {
+            $out = fopen('php://output', 'w');
+            fputcsv($out, ['Student Name', 'Barcode', 'Status', 'Time In', 'Time Out', 'Date']);
+            foreach ($rows as $r) {
+                fputcsv($out, [
+                    $r->student?->full_name,
+                    $r->student?->barcode,
+                    ucfirst($r->status ?? 'absent'),
+                    $r->time_in,
+                    $r->time_out,
+                    optional($r->log_date)->format('Y-m-d'),
+                ]);
+            }
+            fclose($out);
+        }, 200, $headers);
     }
 }
