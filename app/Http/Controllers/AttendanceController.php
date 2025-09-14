@@ -57,6 +57,21 @@ class AttendanceController extends Controller
         return Carbon::parse($s);
     }
 
+    private function computeStatusForTimeIn(?SchoolClass $class, $logDate, $timeIn, int $graceMinutes = 5): string
+    {
+        if (!$class || empty($class->expected_time_in) || empty($timeIn)) {
+            return 'present';
+        }
+
+        $expected = $this->combineDateAndTime($logDate, $class->expected_time_in); // e.g. "08:00"
+        $actual   = $this->combineDateAndTime($logDate, $timeIn);
+
+        // add a grace period (default 5 minutes)
+        $expectedWithGrace = (clone $expected)->addMinutes($graceMinutes);
+
+        return $actual->greaterThan($expectedWithGrace) ? 'late' : 'present';
+    }
+
     /**
      * GET /api/attendances
      * Filters:
@@ -150,7 +165,7 @@ class AttendanceController extends Controller
             return response()->json(['ok' => true, 'action' => 'start'], 201);
         }
 
-        // B) SCAN (hardened)
+        // B) SCAN
         if ($action === 'scan') {
             $data = $request->validate([
                 'class_id' => ['required', 'integer', 'exists:classes,id'],
@@ -163,13 +178,12 @@ class AttendanceController extends Controller
                 return response()->json(['ok' => false, 'message' => 'Student not found'], 404);
             }
 
-            $date = $data['date'] ?? now()->toDateString(); // used for locating the row
-            $MIN_GAP_SECONDS = 10; // adjust as needed
+            $date = $data['date'] ?? now()->toDateString();
+            $MIN_GAP_SECONDS = 10;
 
             $result = null;
 
             DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS) {
-                // Lock the row to avoid race conditions
                 $att = Attendance::where([
                     'type'       => 'class',
                     'class_id'   => $data['class_id'],
@@ -177,31 +191,38 @@ class AttendanceController extends Controller
                     'log_date'   => $date,
                 ])->lockForUpdate()->first();
 
-                // No row yet (or absent pre-seed didn't exist): create and time-in
+                $class = SchoolClass::findOrFail($data['class_id']);
+
+                // No row yet
                 if (!$att) {
+                    $nowTime = now()->format('H:i:s');
+                    $status  = $this->computeStatusForTimeIn($class, $date, $nowTime, 5);
+
                     $att = Attendance::create([
                         'type'       => 'class',
                         'class_id'   => $data['class_id'],
                         'student_id' => $student->id,
                         'log_date'   => $date,
-                        'status'     => 'present',
-                        'time_in'    => now()->format('H:i:s'),
+                        'status'     => $status,
+                        'time_in'    => $nowTime,
                     ]);
-                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
+
+                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $status];
                     return;
                 }
 
-                // If seeded as absent but not yet time_in -> mark time_in now
+                // If seeded as absent but no time_in yet
                 if (!$att->time_in) {
-                    $att->time_in = now()->format('H:i:s');
-                    $att->status  = 'present';
+                    $nowTime = now()->format('H:i:s');
+                    $att->time_in = $nowTime;
+                    $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5);
                     $att->save();
 
-                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name];
+                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $att->status];
                     return;
                 }
 
-                // Already timed in but not yet timed out -> consider timeout (with min gap)
+                // Already timed in but not yet timed out
                 if (!$att->time_out) {
                     $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
                     $now  = now();
@@ -237,14 +258,21 @@ class AttendanceController extends Controller
             'student_id' => ['nullable', 'integer', 'exists:students,id'],
             'log_date'   => ['required', 'date'],
             'status'     => ['nullable', Rule::in(['present', 'late', 'absent', 'excused', 'in', 'out'])],
-            'time_in'    => ['nullable', 'date_format:H:i'],
-            'time_out'   => ['nullable', 'date_format:H:i', 'after_or_equal:time_in'],
+            'time_in'    => ['nullable', 'date_format:H:i:s'],
+            'time_out'   => ['nullable', 'date_format:H:i:s', 'after_or_equal:time_in'],
             'note'       => ['nullable', 'string', 'max:255'],
         ]);
+
+        // Auto-set status if missing but we have time_in
+        if (($data['type'] ?? null) === 'class' && !empty($data['class_id']) && !empty($data['time_in']) && empty($data['status'])) {
+            $class = SchoolClass::find($data['class_id']);
+            $data['status'] = $this->computeStatusForTimeIn($class, $data['log_date'], $data['time_in'], 5);
+        }
 
         $attendance = Attendance::create($data);
         return response()->json($attendance, 201);
     }
+
 
     /** GET /api/attendances/{attendance} */
     public function show(Attendance $attendance)
@@ -255,16 +283,46 @@ class AttendanceController extends Controller
     /** PUT/PATCH /api/attendances/{attendance} */
     public function update(Request $request, Attendance $attendance)
     {
+        // Validate incoming fields (seconds included to match scan flow)
         $data = $request->validate([
-            'status'   => ['nullable', Rule::in(['present', 'late', 'absent', 'excused', 'in', 'out'])],
-            'time_in'  => ['nullable', 'date_format:H:i'],
-            'time_out' => ['nullable', 'date_format:H:i', 'after_or_equal:time_in'],
-            'note'     => ['nullable', 'string', 'max:255'],
+            'class_id' => ['sometimes', 'nullable', 'integer', 'exists:classes,id'],
+            'student_id' => ['sometimes', 'nullable', 'integer', 'exists:students,id'],
+            'log_date' => ['sometimes', 'date'],
+            'status'   => ['sometimes', 'nullable', Rule::in(['present', 'late', 'absent', 'excused', 'in', 'out'])],
+            'time_in'  => ['sometimes', 'nullable', 'date_format:H:i:s'],
+            'time_out' => ['sometimes', 'nullable', 'date_format:H:i:s', 'after_or_equal:time_in'],
+            'note'     => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
-        $attendance->update($data);
+        // Apply changes first (but not saved yet)
+        $att = clone $attendance;
+        foreach ($data as $k => $v) {
+            $att->{$k} = $v;
+        }
+
+        // Auto-compute late/present ONLY when:
+        // - This is a class log (existing or updated to class type)
+        // - We have/keep a class_id
+        // - time_in is present (either newly provided or already set)
+        // - Client did NOT explicitly send 'status' in this request
+        $clientSentStatus = array_key_exists('status', $data);
+
+        $isClassType = ($att->type ?? $attendance->type) === 'class';
+        $classId = $att->class_id ?? $attendance->class_id;
+        $timeIn  = $att->time_in ?? $attendance->time_in;
+        $logDate = $att->log_date ?? $attendance->log_date;
+
+        if ($isClassType && $classId && $timeIn && !$clientSentStatus) {
+            $class = SchoolClass::find($classId);
+            $att->status = $this->computeStatusForTimeIn($class, $logDate, $timeIn, 5);
+        }
+
+        // Persist
+        $attendance->update($att->getAttributes());
+
         return $attendance->fresh()->load('student:id,full_name,barcode');
     }
+
 
     /** DELETE /api/attendances/{attendance} */
     public function destroy(Attendance $attendance)
