@@ -7,6 +7,7 @@ use App\Models\SchoolClass;
 use App\Models\Student;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Carbon\Carbon;
@@ -57,17 +58,59 @@ class AttendanceController extends Controller
         return Carbon::parse($s);
     }
 
-    private function computeStatusForTimeIn(?SchoolClass $class, $logDate, $timeIn, int $graceMinutes = 5): string
+    /**
+     * Compute present/late using either:
+     *  - provided expected time override ($expectedOverride), or
+     *  - the class's expected_time_in value.
+     *
+     * $logDate can be "YYYY-MM-DD" or a DateTime.
+     * $timeIn may be "HH:MM:SS" (time-only) or a datetime string.
+     */
+    private function computeStatusForTimeIn(?SchoolClass $class, $logDate, $timeIn, int $graceMinutes = 5, ?string $expectedOverride = null): string
     {
-        if (!$class || empty($class->expected_time_in) || empty($timeIn)) {
+        // choose which expected time value to use
+        $expectedTimeValue = $expectedOverride ?? ($class->expected_time_in ?? null);
+
+        if (empty($expectedTimeValue) || empty($timeIn)) {
+            Log::warning('Attendance status fallback to present — missing data', [
+                'class_id' => $class?->id,
+                'logDate' => $logDate,
+                'timeIn' => $timeIn,
+                'expected_time_in' => $expectedTimeValue,
+            ]);
             return 'present';
         }
 
-        $expected = $this->combineDateAndTime($logDate, $class->expected_time_in); // e.g. "08:00"
-        $actual   = $this->combineDateAndTime($logDate, $timeIn);
+        // make sure we have only date part for combining
+        $datePart = $this->toDateString($logDate, now()->toDateString());
 
-        // add a grace period (default 5 minutes)
+        try {
+            $expected = $this->combineDateAndTime($datePart, $expectedTimeValue);
+            $actual   = $this->combineDateAndTime($datePart, $timeIn);
+        } catch (\Throwable $ex) {
+            Log::error('Failed to parse expected/actual times for attendance', [
+                'class_id' => $class?->id,
+                'logDate' => $datePart,
+                'expected_time_in' => $expectedTimeValue,
+                'timeIn' => $timeIn,
+                'exception' => $ex->getMessage(),
+            ]);
+            // safe fallback
+            return 'present';
+        }
+
         $expectedWithGrace = (clone $expected)->addMinutes($graceMinutes);
+
+        Log::info('Attendance status computation', [
+            'class_id' => $class?->id,
+            'logDate' => $datePart,
+            'expected_time_in_used' => $expectedTimeValue,
+            'timeIn' => $timeIn,
+            'expected' => $expected->toDateTimeString(),
+            'expected_with_grace' => $expectedWithGrace->toDateTimeString(),
+            'actual' => $actual->toDateTimeString(),
+            'isLate' => $actual->greaterThan($expectedWithGrace),
+        ]);
 
         return $actual->greaterThan($expectedWithGrace) ? 'late' : 'present';
     }
@@ -80,9 +123,6 @@ class AttendanceController extends Controller
      *  - date=YYYY-MM-DD  (exact)
      *  - date_from=YYYY-MM-DD, date_to=YYYY-MM-DD
      *  - q= search (student name or barcode or status)
-     * Response:
-     *  - If type=class & class_id & date given => compact table rows for your UI
-     *  - else => paginated attendances with relations
      */
     public function index(Request $request)
     {
@@ -130,7 +170,7 @@ class AttendanceController extends Controller
      *     { action:"start", class_id, date }
      *
      *  B) Scan (toggle in/out via barcode):
-     *     { action:"scan", class_id, date?, barcode }
+     *     { action:"scan", class_id, date?, barcode, expected_time_in? }
      *
      *  C) Manual create (single row):
      *     { type, class_id?, student_id?, log_date, status?, time_in?, time_out?, note? }
@@ -171,7 +211,10 @@ class AttendanceController extends Controller
                 'class_id' => ['required', 'integer', 'exists:classes,id'],
                 'barcode'  => ['required', 'string'],
                 'date'     => ['nullable', 'date'],
+                'expected_time_in' => ['nullable', 'string'], // optional override
             ]);
+
+            $providedExpected = $data['expected_time_in'] ?? null;
 
             $student = Student::where('barcode', $data['barcode'])->first();
             if (!$student) {
@@ -183,7 +226,7 @@ class AttendanceController extends Controller
 
             $result = null;
 
-            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS) {
+            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected) {
                 $att = Attendance::where([
                     'type'       => 'class',
                     'class_id'   => $data['class_id'],
@@ -196,7 +239,9 @@ class AttendanceController extends Controller
                 // No row yet
                 if (!$att) {
                     $nowTime = now()->format('H:i:s');
-                    $status  = $this->computeStatusForTimeIn($class, $date, $nowTime, 5);
+
+                    // use provided expected time if present, otherwise class value
+                    $status  = $this->computeStatusForTimeIn($class, $date, $nowTime, 5, $providedExpected);
 
                     $att = Attendance::create([
                         'type'       => 'class',
@@ -214,8 +259,10 @@ class AttendanceController extends Controller
                 // If seeded as absent but no time_in yet
                 if (!$att->time_in) {
                     $nowTime = now()->format('H:i:s');
+
+                    // use provided expected time if present, otherwise class value
                     $att->time_in = $nowTime;
-                    $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5);
+                    $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5, $providedExpected);
                     $att->save();
 
                     $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $att->status];
@@ -273,7 +320,6 @@ class AttendanceController extends Controller
         return response()->json($attendance, 201);
     }
 
-
     /** GET /api/attendances/{attendance} */
     public function show(Attendance $attendance)
     {
@@ -322,7 +368,6 @@ class AttendanceController extends Controller
 
         return $attendance->fresh()->load('student:id,full_name,barcode');
     }
-
 
     /** DELETE /api/attendances/{attendance} */
     public function destroy(Attendance $attendance)
