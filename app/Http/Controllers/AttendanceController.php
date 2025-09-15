@@ -327,6 +327,7 @@ class AttendanceController extends Controller
     }
 
     /** PUT/PATCH /api/attendances/{attendance} */
+    /** PUT/PATCH /api/attendances/{attendance} */
     public function update(Request $request, Attendance $attendance)
     {
         // Validate incoming fields (seconds included to match scan flow)
@@ -338,6 +339,8 @@ class AttendanceController extends Controller
             'time_in'  => ['sometimes', 'nullable', 'date_format:H:i:s'],
             'time_out' => ['sometimes', 'nullable', 'date_format:H:i:s', 'after_or_equal:time_in'],
             'note'     => ['sometimes', 'nullable', 'string', 'max:255'],
+
+            'expected_time_in' => ['nullable', 'string'], // optional override
         ]);
 
         // Apply changes first (but not saved yet)
@@ -346,11 +349,7 @@ class AttendanceController extends Controller
             $att->{$k} = $v;
         }
 
-        // Auto-compute late/present ONLY when:
-        // - This is a class log (existing or updated to class type)
-        // - We have/keep a class_id
-        // - time_in is present (either newly provided or already set)
-        // - Client did NOT explicitly send 'status' in this request
+        // Check if client explicitly sent a status
         $clientSentStatus = array_key_exists('status', $data);
 
         $isClassType = ($att->type ?? $attendance->type) === 'class';
@@ -358,9 +357,20 @@ class AttendanceController extends Controller
         $timeIn  = $att->time_in ?? $attendance->time_in;
         $logDate = $att->log_date ?? $attendance->log_date;
 
+        // Grab expected_time_in override if present
+        $expectedOverride = $data['expected_time_in'] ?? null;
+
         if ($isClassType && $classId && $timeIn && !$clientSentStatus) {
             $class = SchoolClass::find($classId);
-            $att->status = $this->computeStatusForTimeIn($class, $logDate, $timeIn, 5);
+
+            // Pass the override to computeStatusForTimeIn
+            $att->status = $this->computeStatusForTimeIn(
+                $class,
+                $logDate,
+                $timeIn,
+                5,
+                $expectedOverride
+            );
         }
 
         // Persist
@@ -368,6 +378,7 @@ class AttendanceController extends Controller
 
         return $attendance->fresh()->load('student:id,full_name,barcode');
     }
+
 
     /** DELETE /api/attendances/{attendance} */
     public function destroy(Attendance $attendance)
