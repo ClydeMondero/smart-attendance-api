@@ -25,9 +25,4 @@ class SchoolClass extends Model
     {
         return $this->hasMany(Student::class, 'class_id');
     }
-
-    public function sessions()
-    {
-        return $this->hasMany(AttendanceSession::class, 'class_id');
-    }
 }

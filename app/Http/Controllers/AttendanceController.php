@@ -208,12 +208,14 @@ class AttendanceController extends Controller
         // B) SCAN
         if ($action === 'scan') {
             $data = $request->validate([
-                'class_id' => ['required', 'integer', 'exists:classes,id'],
-                'barcode'  => ['required', 'string'],
-                'date'     => ['nullable', 'date'],
-                'expected_time_in' => ['nullable', 'string'], // optional override
+                'class_id'         => ['nullable', 'integer', 'exists:classes,id'], // make it nullable
+                'barcode'          => ['required', 'string'],
+                'date'             => ['nullable', 'date'],
+                'expected_time_in' => ['nullable', 'string'], // optional override (class only)
+                'type'             => ['nullable', Rule::in(['class', 'entry'])], // allow explicit type
             ]);
 
+            $type = $data['type'] ?? (!empty($data['class_id']) ? 'class' : 'entry');
             $providedExpected = $data['expected_time_in'] ?? null;
 
             $student = Student::where('barcode', $data['barcode'])->first();
@@ -223,80 +225,127 @@ class AttendanceController extends Controller
 
             $date = $data['date'] ?? now()->toDateString();
             $MIN_GAP_SECONDS = 10;
-
             $result = null;
 
-            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected) {
-                $att = Attendance::where([
-                    'type'       => 'class',
-                    'class_id'   => $data['class_id'],
-                    'student_id' => $student->id,
-                    'log_date'   => $date,
-                ])->lockForUpdate()->first();
+            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected, $type) {
 
-                $class = SchoolClass::findOrFail($data['class_id']);
-
-                // No row yet
-                if (!$att) {
-                    $nowTime = now()->format('H:i:s');
-
-                    // use provided expected time if present, otherwise class value
-                    $status  = $this->computeStatusForTimeIn($class, $date, $nowTime, 5, $providedExpected);
-
-                    $att = Attendance::create([
+                if ($type === 'class') {
+                    // -------------------------
+                    // CLASS ATTENDANCE LOGIC
+                    // -------------------------
+                    $att = Attendance::where([
                         'type'       => 'class',
                         'class_id'   => $data['class_id'],
                         'student_id' => $student->id,
                         'log_date'   => $date,
-                        'status'     => $status,
-                        'time_in'    => $nowTime,
-                    ]);
+                    ])->lockForUpdate()->first();
 
-                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $status];
-                    return;
-                }
-
-                // If seeded as absent but no time_in yet
-                if (!$att->time_in) {
+                    $class = SchoolClass::findOrFail($data['class_id']);
                     $nowTime = now()->format('H:i:s');
 
-                    // use provided expected time if present, otherwise class value
-                    $att->time_in = $nowTime;
-                    $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5, $providedExpected);
-                    $att->save();
+                    if (!$att) {
+                        $status = $this->computeStatusForTimeIn($class, $date, $nowTime, 5, $providedExpected);
 
-                    $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $att->status];
-                    return;
-                }
+                        $att = Attendance::create([
+                            'type'       => 'class',
+                            'class_id'   => $data['class_id'],
+                            'student_id' => $student->id,
+                            'log_date'   => $date,
+                            'status'     => $status,
+                            'time_in'    => $nowTime,
+                        ]);
 
-                // Already timed in but not yet timed out
-                if (!$att->time_out) {
-                    $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
-                    $now  = now();
-
-                    if ($inAt->diffInSeconds($now) < $MIN_GAP_SECONDS) {
-                        $result = [
-                            'ok'      => true,
-                            'action'  => 'noop_cooldown',
-                            'student' => $student->full_name,
-                            'message' => "Please wait at least {$MIN_GAP_SECONDS}s before timing out.",
-                        ];
+                        $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $status];
                         return;
                     }
 
-                    $att->time_out = $now->format('H:i:s');
-                    $att->save();
+                    if (!$att->time_in) {
+                        $att->time_in = $nowTime;
+                        $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5, $providedExpected);
+                        $att->save();
 
-                    $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
-                    return;
+                        $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $att->status];
+                        return;
+                    }
+
+                    if (!$att->time_out) {
+                        $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
+                        $now  = now();
+
+                        if ($inAt->diffInSeconds($now) < $MIN_GAP_SECONDS) {
+                            $result = [
+                                'ok'      => true,
+                                'action'  => 'noop_cooldown',
+                                'student' => $student->full_name,
+                                'message' => "Please wait at least {$MIN_GAP_SECONDS}s before timing out.",
+                            ];
+                            return;
+                        }
+
+                        $att->time_out = $now->format('H:i:s');
+                        $att->save();
+
+                        $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
+                        return;
+                    }
+
+                    $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student->full_name];
                 }
 
-                // Already has time_in and time_out
-                $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student->full_name];
+                if ($type === 'entry') {
+                    // -------------------------
+                    // ENTRY ATTENDANCE LOGIC
+                    // -------------------------
+                    $att = Attendance::where([
+                        'type'       => 'entry',
+                        'student_id' => $student->id,
+                        'log_date'   => $date,
+                    ])->lockForUpdate()->first();
+
+                    $nowTime = now()->format('H:i:s');
+
+                    if (!$att) {
+                        $att = Attendance::create([
+                            'type'       => 'entry',
+                            'student_id' => $student->id,
+                            'log_date'   => $date,
+                            'status'     => 'in',
+                            'time_in'    => $nowTime,
+                        ]);
+
+                        $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => 'in'];
+                        return;
+                    }
+
+                    if (!$att->time_out) {
+                        $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
+                        $now  = now();
+
+                        if ($inAt->diffInSeconds($now) < $MIN_GAP_SECONDS) {
+                            $result = [
+                                'ok'      => true,
+                                'action'  => 'noop_cooldown',
+                                'student' => $student->full_name,
+                                'message' => "Please wait at least {$MIN_GAP_SECONDS}s before timing out.",
+                            ];
+                            return;
+                        }
+
+                        $att->time_out = $now->format('H:i:s');
+                        $att->status   = 'out';
+                        $att->save();
+
+                        $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
+                        return;
+                    }
+
+                    $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student->full_name];
+                }
             });
 
             return $result;
         }
+
 
         // C) MANUAL CREATE
         $data = $request->validate([
@@ -422,5 +471,66 @@ class AttendanceController extends Controller
             }
             fclose($out);
         }, 200, $headers);
+    }
+
+
+    // GET /api/attendances/stats?date=2025-09-19&type=class
+    public function stats(Request $request)
+    {
+        $date = $request->input('date', now()->toDateString());
+        $yesterday = \Carbon\Carbon::parse($date)->subDay()->toDateString();
+        $type = $request->input('type', 'class'); // default to class
+
+        if ($type === 'class') {
+            $todayCounts = Attendance::where('type', 'class')
+                ->whereDate('log_date', $date)
+                ->selectRaw("SUM(status IN ('present','late')) as present_count")
+                ->selectRaw("SUM(status = 'absent') as absent_count")
+                ->first();
+
+            $yesterdayCounts = Attendance::where('type', 'class')
+                ->whereDate('log_date', $yesterday)
+                ->selectRaw("SUM(status IN ('present','late')) as present_count")
+                ->selectRaw("SUM(status = 'absent') as absent_count")
+                ->first();
+
+            return response()->json([
+                'today' => [
+                    'present' => (int) $todayCounts->present_count,
+                    'absent'  => (int) $todayCounts->absent_count,
+                ],
+                'yesterday' => [
+                    'present' => (int) $yesterdayCounts->present_count,
+                    'absent'  => (int) $yesterdayCounts->absent_count,
+                ],
+            ]);
+        }
+
+        if ($type === 'entry') {
+            $todayCounts = Attendance::where('type', 'entry')
+                ->whereDate('log_date', $date)
+                ->selectRaw("SUM(status = 'in') as in_count")
+                ->selectRaw("SUM(status = 'out') as out_count")
+                ->first();
+
+            $yesterdayCounts = Attendance::where('type', 'entry')
+                ->whereDate('log_date', $yesterday)
+                ->selectRaw("SUM(status = 'in') as in_count")
+                ->selectRaw("SUM(status = 'out') as out_count")
+                ->first();
+
+            return response()->json([
+                'today' => [
+                    'in'  => (int) $todayCounts->in_count,
+                    'out' => (int) $todayCounts->out_count,
+                ],
+                'yesterday' => [
+                    'in'  => (int) $yesterdayCounts->in_count,
+                    'out' => (int) $yesterdayCounts->out_count,
+                ],
+            ]);
+        }
+
+        return response()->json(['error' => 'Invalid type'], 400);
     }
 }

@@ -32,5 +32,15 @@ class UserSeeder extends Seeder
                 'role' => 'teacher',
             ]
         );
+
+        // Operator account
+        User::updateOrCreate(
+            ['email' => 'operator@example.com'],
+            [
+                'name' => 'Operator User',
+                'password' => Hash::make('password123'),
+                'role' => 'operator',
+            ]
+        );
     }
 }

@@ -4,8 +4,6 @@ use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClassController;
 use App\Http\Controllers\StudentController;
-use App\Models\SchoolClass;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
@@ -15,6 +13,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('classes', ClassController::class);
 
+    Route::get('attendances/stats', [AttendanceController::class, 'stats']);
     Route::apiResource('attendances', AttendanceController::class);
 
     Route::apiResource('students', StudentController::class);

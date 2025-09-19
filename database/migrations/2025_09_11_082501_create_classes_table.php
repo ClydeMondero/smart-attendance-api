@@ -36,21 +36,6 @@ return new class extends Migration {
         });
 
         /* -------------------------------
-         * ATTENDANCE SESSIONS
-         * one per class per day
-         * ------------------------------- */
-        Schema::create('attendance_sessions', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('class_id')->constrained('classes')->cascadeOnDelete();
-            $table->date('session_date')->index();
-            $table->enum('status', ['open', 'closed'])->default('open')->index();
-            $table->foreignId('started_by')->nullable()->constrained('users')->nullOnDelete();
-            $table->timestamps();
-
-            $table->unique(['class_id', 'session_date'], 'class_day_unique');
-        });
-
-        /* -------------------------------
          * ATTENDANCES
          * unified for class & gate entry
          * ------------------------------- */
@@ -60,9 +45,6 @@ return new class extends Migration {
             // distinguish record type
             $table->enum('type', ['class', 'entry'])->index();
 
-            // relations (nullable for gate entries)
-            $table->foreignId('attendance_session_id')->nullable()
-                ->constrained('attendance_sessions')->nullOnDelete();
             $table->foreignId('class_id')->nullable()
                 ->constrained('classes')->nullOnDelete();
             $table->foreignId('student_id')->nullable()
@@ -85,14 +67,13 @@ return new class extends Migration {
             $table->timestamps();
             $table->softDeletes();
 
-            $table->index(['type', 'attendance_session_id', 'student_id'], 'att_type_session_student_idx');
+            $table->index(['type',  'student_id'], 'att_type_session_student_idx');
         });
     }
 
     public function down(): void
     {
         Schema::dropIfExists('attendances');
-        Schema::dropIfExists('attendance_sessions');
         Schema::dropIfExists('classes');
         Schema::dropIfExists('students');
     }
