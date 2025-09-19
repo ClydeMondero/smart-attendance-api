@@ -4,6 +4,7 @@ use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClassController;
 use App\Http\Controllers\StudentController;
+use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
@@ -25,6 +26,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Example: admin-only resource
     Route::middleware('role:admin')->group(function () {
+        Route::apiResource('users', UserController::class);
+
         Route::post('/register', [AuthController::class, 'register']);
 
         Route::get('/admin/dashboard', fn() => response()->json(['message' => 'Admin dashboard']));

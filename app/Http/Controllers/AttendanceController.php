@@ -128,7 +128,14 @@ class AttendanceController extends Controller
     {
         $q = Attendance::query()
             ->when($request->type, fn($x, $t) => $x->where('type', $t))
-            ->when($request->class_id, fn($x, $cid) => $x->where('class_id', $cid))
+            ->when($request->class_id, function ($x, $cid) {
+                // filter by student's class_id (since attendances table may have null class_id)
+                $x->whereHas('student', fn($s) => $s->where('class_id', $cid));
+            })
+            ->when($request->section, function ($x, $sec) {
+                // filter by related schoolClass.section
+                $x->whereHas('student.schoolClass', fn($sc) => $sc->where('section', $sec));
+            })
             ->when($request->date, fn($x, $d) => $x->whereDate('log_date', $d))
             ->when($request->date_from, fn($x, $d) => $x->whereDate('log_date', '>=', $d))
             ->when($request->date_to, fn($x, $d) => $x->whereDate('log_date', '<=', $d))
@@ -140,7 +147,11 @@ class AttendanceController extends Controller
                         ->orWhere('status', 'like', "%$s%");
                 });
             })
-            ->with(['student:id,full_name,barcode', 'schoolClass:id,grade_level,section']);
+            ->with([
+                'student:id,full_name,barcode,class_id',
+                'student.schoolClass:id,grade_level,section'
+            ]);
+
 
         // Compact table shape for ClassAttendanceLog page
         if ($request->type === 'class' && $request->filled(['class_id', 'date'])) {
@@ -375,7 +386,6 @@ class AttendanceController extends Controller
         return $attendance->load(['student:id,full_name,barcode', 'schoolClass:id,grade_level,section']);
     }
 
-    /** PUT/PATCH /api/attendances/{attendance} */
     /** PUT/PATCH /api/attendances/{attendance} */
     public function update(Request $request, Attendance $attendance)
     {
