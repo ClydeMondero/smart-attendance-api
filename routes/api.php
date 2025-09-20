@@ -26,7 +26,12 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Example: admin-only resource
     Route::middleware('role:admin')->group(function () {
+        Route::put('/users/{user}/status', [UserController::class, 'toggleStatus']);
+        Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword']);
+        Route::post('/reset-password', [UserController::class, 'handleReset']);
         Route::apiResource('users', UserController::class);
+
+
 
         Route::post('/register', [AuthController::class, 'register']);
 
