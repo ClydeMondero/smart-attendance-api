@@ -5,6 +5,8 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClassController;
 use App\Http\Controllers\StudentController;
 use App\Http\Controllers\UserController;
+use App\Http\Controllers\SubjectController;
+use App\Http\Controllers\GradeController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
@@ -31,9 +33,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/reset-password', [UserController::class, 'handleReset']);
         Route::apiResource('users', UserController::class);
 
-
-
         Route::post('/register', [AuthController::class, 'register']);
+
+        Route::apiResource('subjects', SubjectController::class);
+        Route::apiResource('grades', GradeController::class);
 
         Route::get('/admin/dashboard', fn() => response()->json(['message' => 'Admin dashboard']));
     });

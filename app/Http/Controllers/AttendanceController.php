@@ -12,6 +12,7 @@ use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Carbon\Carbon;
 use DateTimeInterface;
+use App\Services\TwilioService;
 
 class AttendanceController extends Controller
 {
@@ -186,7 +187,7 @@ class AttendanceController extends Controller
      *  C) Manual create (single row):
      *     { type, class_id?, student_id?, log_date, status?, time_in?, time_out?, note? }
      */
-    public function store(Request $request)
+    public function store(Request $request, TwilioService $twilio)
     {
         $action = $request->input('action');
 
@@ -219,11 +220,11 @@ class AttendanceController extends Controller
         // B) SCAN
         if ($action === 'scan') {
             $data = $request->validate([
-                'class_id'         => ['nullable', 'integer', 'exists:classes,id'], // make it nullable
+                'class_id'         => ['nullable', 'integer', 'exists:classes,id'],
                 'barcode'          => ['required', 'string'],
                 'date'             => ['nullable', 'date'],
-                'expected_time_in' => ['nullable', 'string'], // optional override (class only)
-                'type'             => ['nullable', Rule::in(['class', 'entry'])], // allow explicit type
+                'expected_time_in' => ['nullable', 'string'],
+                'type'             => ['nullable', Rule::in(['class', 'entry'])],
             ]);
 
             $type = $data['type'] ?? (!empty($data['class_id']) ? 'class' : 'entry');
@@ -238,12 +239,11 @@ class AttendanceController extends Controller
             $MIN_GAP_SECONDS = 10;
             $result = null;
 
-            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected, $type) {
+            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected, $type, $twilio) {
+
+                $nowTime = now()->format('H:i:s');
 
                 if ($type === 'class') {
-                    // -------------------------
-                    // CLASS ATTENDANCE LOGIC
-                    // -------------------------
                     $att = Attendance::where([
                         'type'       => 'class',
                         'class_id'   => $data['class_id'],
@@ -252,7 +252,6 @@ class AttendanceController extends Controller
                     ])->lockForUpdate()->first();
 
                     $class = SchoolClass::findOrFail($data['class_id']);
-                    $nowTime = now()->format('H:i:s');
 
                     if (!$att) {
                         $status = $this->computeStatusForTimeIn($class, $date, $nowTime, 5, $providedExpected);
@@ -266,6 +265,14 @@ class AttendanceController extends Controller
                             'time_in'    => $nowTime,
                         ]);
 
+                        // Send SMS
+                        if (!empty($student->parent_contact)) {
+                            $twilio->sendSms(
+                                $student->parent_contact,
+                                "{$student->full_name} has timed in at {$nowTime} ({$status})."
+                            );
+                        }
+
                         $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $status];
                         return;
                     }
@@ -274,6 +281,13 @@ class AttendanceController extends Controller
                         $att->time_in = $nowTime;
                         $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5, $providedExpected);
                         $att->save();
+
+                        if (!empty($student->parent_contact)) {
+                            $twilio->sendSms(
+                                $student->parent_contact,
+                                "{$student->full_name} has timed in at {$nowTime} ({$att->status})."
+                            );
+                        }
 
                         $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $att->status];
                         return;
@@ -296,6 +310,13 @@ class AttendanceController extends Controller
                         $att->time_out = $now->format('H:i:s');
                         $att->save();
 
+                        if (!empty($student->parent_contact)) {
+                            $twilio->sendSms(
+                                $student->parent_contact,
+                                "{$student->full_name} has timed out at {$att->time_out}."
+                            );
+                        }
+
                         $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
                         return;
                     }
@@ -304,16 +325,11 @@ class AttendanceController extends Controller
                 }
 
                 if ($type === 'entry') {
-                    // -------------------------
-                    // ENTRY ATTENDANCE LOGIC
-                    // -------------------------
                     $att = Attendance::where([
                         'type'       => 'entry',
                         'student_id' => $student->id,
                         'log_date'   => $date,
                     ])->lockForUpdate()->first();
-
-                    $nowTime = now()->format('H:i:s');
 
                     if (!$att) {
                         $att = Attendance::create([
@@ -323,6 +339,13 @@ class AttendanceController extends Controller
                             'status'     => 'in',
                             'time_in'    => $nowTime,
                         ]);
+
+                        if (!empty($student->parent_contact)) {
+                            $twilio->sendSms(
+                                $student->parent_contact,
+                                "{$student->full_name} has entered at {$nowTime}."
+                            );
+                        }
 
                         $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => 'in'];
                         return;
@@ -345,6 +368,13 @@ class AttendanceController extends Controller
                         $att->time_out = $now->format('H:i:s');
                         $att->status   = 'out';
                         $att->save();
+
+                        if (!empty($student->parent_contact)) {
+                            $twilio->sendSms(
+                                $student->parent_contact,
+                                "{$student->full_name} has exited at {$att->time_out}."
+                            );
+                        }
 
                         $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
                         return;
