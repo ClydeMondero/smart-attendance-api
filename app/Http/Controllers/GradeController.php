@@ -7,9 +7,20 @@ use Illuminate\Http\Request;
 
 class GradeController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(Grade::with(['student', 'subject'])->get());
+        $query = Grade::with(['student', 'subject']);
+
+        if ($request->user()->role === 'teacher') {
+            $teacher = $request->user()->name;
+            $query->whereHas('subject.schoolClass', function ($q) use ($teacher) {
+                $q->where('teacher', $teacher);
+            })->whereHas('student.schoolClass', function ($q) use ($teacher) {
+                $q->where('teacher', $teacher);
+            });
+        }
+
+        return response()->json($query->get());
     }
 
     public function store(Request $request)

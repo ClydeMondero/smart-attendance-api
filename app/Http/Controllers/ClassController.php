@@ -20,10 +20,14 @@ class ClassController extends Controller
                     ->orWhere('teacher', 'like', "%$search%");
             })
             ->when($request->grade_level, fn($query, $gl) => $query->where('grade_level', $gl))
-            ->when($request->status, fn($query, $st) => $query->where('status', strtolower($st)));
+            ->when($request->status, fn($query, $st) => $query->where('status', strtolower($st)))
+            ->when($request->teacher, fn($query, $teacher) => $query->where('teacher', $teacher));
 
-        return $q->orderBy('grade_level')->orderBy('section')->paginate($request->integer('per_page', 20));
+        return $q->orderBy('grade_level')
+            ->orderBy('section')
+            ->paginate($request->integer('per_page', 20));
     }
+
 
     /**
      * Store a newly created resource.
@@ -82,6 +86,4 @@ class ClassController extends Controller
 
         return response()->noContent();
     }
-
-    // Optional: create() and edit() are for Blade views, usually not used in APIs
 }

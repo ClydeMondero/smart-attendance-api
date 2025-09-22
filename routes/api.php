@@ -3,6 +3,7 @@
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ClassController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\StudentController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\SubjectController;
@@ -21,6 +22,16 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('students', StudentController::class);
 
+    Route::apiResource('subjects', SubjectController::class);
+    Route::apiResource('grades', GradeController::class);
+
+    Route::prefix('dashboard')->group(function () {
+        Route::get('/summary', [DashboardController::class, 'summary']);
+        Route::get('/trend', [DashboardController::class, 'trend']);
+        Route::get('/classes', [DashboardController::class, 'classes']);
+        Route::get('/logs', [DashboardController::class, 'logs']);
+    });
+
     // Example: teacher-only resource
     Route::middleware('role:teacher')->group(function () {
         Route::get('/teacher/dashboard', fn() => response()->json(['message' => 'Teacher dashboard']));
@@ -35,8 +46,6 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::post('/register', [AuthController::class, 'register']);
 
-        Route::apiResource('subjects', SubjectController::class);
-        Route::apiResource('grades', GradeController::class);
 
         Route::get('/admin/dashboard', fn() => response()->json(['message' => 'Admin dashboard']));
     });

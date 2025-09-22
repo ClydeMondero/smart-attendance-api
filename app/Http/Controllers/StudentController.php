@@ -15,8 +15,14 @@ class StudentController extends Controller
     {
         $perPage = (int) $request->query('per_page', 15);
         $q = $request->query('q');
+        $user = $request->user();
 
         $students = Student::query()
+            ->when($user->role === 'teacher', function ($builder) use ($user) {
+                $builder->whereHas('schoolClass', function ($q) use ($user) {
+                    $q->where('teacher', $user->name);
+                });
+            })
             ->when($q, function ($builder, $term) {
                 $builder->where(function ($w) use ($term) {
                     $w->where('barcode', 'like', "%{$term}%")

@@ -8,10 +8,20 @@ use Illuminate\Validation\Rule;
 
 class SubjectController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(Subject::with('schoolClass')->get());
+        $query = Subject::with('schoolClass');
+
+        if ($request->user()->role === 'teacher') {
+            $teacher = $request->user()->name;
+            $query->whereHas('schoolClass', function ($q) use ($teacher) {
+                $q->where('teacher', $teacher);
+            });
+        }
+
+        return response()->json($query->get());
     }
+
 
     public function store(Request $request)
     {
