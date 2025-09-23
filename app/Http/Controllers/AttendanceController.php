@@ -12,7 +12,7 @@ use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Carbon\Carbon;
 use DateTimeInterface;
-use App\Services\TwilioService;
+use App\Services\TextBeeService;
 
 class AttendanceController extends Controller
 {
@@ -187,11 +187,11 @@ class AttendanceController extends Controller
      *  C) Manual create (single row):
      *     { type, class_id?, student_id?, log_date, status?, time_in?, time_out?, note? }
      */
-    public function store(Request $request, TwilioService $twilio)
+    public function store(Request $request, TextBeeService $textbee)
     {
         $action = $request->input('action');
 
-        // A) START
+        // A) START ATTENDANCE
         if ($action === 'start') {
             $data = $request->validate([
                 'class_id' => ['required', 'integer', 'exists:classes,id'],
@@ -239,8 +239,7 @@ class AttendanceController extends Controller
             $MIN_GAP_SECONDS = 10;
             $result = null;
 
-            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected, $type, $twilio) {
-
+            DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected, $type, $textbee) {
                 $nowTime = now()->format('H:i:s');
 
                 if ($type === 'class') {
@@ -253,6 +252,7 @@ class AttendanceController extends Controller
 
                     $class = SchoolClass::findOrFail($data['class_id']);
 
+                    // FIRST TIME IN
                     if (!$att) {
                         $status = $this->computeStatusForTimeIn($class, $date, $nowTime, 5, $providedExpected);
 
@@ -265,27 +265,25 @@ class AttendanceController extends Controller
                             'time_in'    => $nowTime,
                         ]);
 
-                        // Send SMS
-                        if (!empty($student->parent_contact)) {
-                            $twilio->sendSms(
-                                $student->parent_contact,
-                                "{$student->full_name} has timed in at {$nowTime} ({$status})."
-                            );
-                        }
+                        $textbee->sendSms(
+                            $student->parent_contact,
+                            "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has recorded a time-in at {$nowTime}. Status: {$status}. - Smart Attendance. Please do not reply to this automated message."
+                        );
 
                         $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $status];
                         return;
                     }
 
+                    // TIME IN if missing
                     if (!$att->time_in) {
                         $att->time_in = $nowTime;
                         $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5, $providedExpected);
                         $att->save();
 
                         if (!empty($student->parent_contact)) {
-                            $twilio->sendSms(
+                            $textbee->sendSms(
                                 $student->parent_contact,
-                                "{$student->full_name} has timed in at {$nowTime} ({$att->status})."
+                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has recorded a time-in at {$nowTime}. Status: {$att->status}. - Smart Attendance. Please do not reply to this automated message."
                             );
                         }
 
@@ -293,6 +291,7 @@ class AttendanceController extends Controller
                         return;
                     }
 
+                    // TIME OUT if missing
                     if (!$att->time_out) {
                         $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
                         $now  = now();
@@ -311,9 +310,9 @@ class AttendanceController extends Controller
                         $att->save();
 
                         if (!empty($student->parent_contact)) {
-                            $twilio->sendSms(
+                            $textbee->sendSms(
                                 $student->parent_contact,
-                                "{$student->full_name} has timed out at {$att->time_out}."
+                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has recorded a time-out at {$att->time_out}. - Smart Attendance. Please do not reply to this automated message."
                             );
                         }
 
@@ -324,6 +323,7 @@ class AttendanceController extends Controller
                     $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student->full_name];
                 }
 
+                // ENTRY type
                 if ($type === 'entry') {
                     $att = Attendance::where([
                         'type'       => 'entry',
@@ -341,9 +341,9 @@ class AttendanceController extends Controller
                         ]);
 
                         if (!empty($student->parent_contact)) {
-                            $twilio->sendSms(
+                            $textbee->sendSms(
                                 $student->parent_contact,
-                                "{$student->full_name} has entered at {$nowTime}."
+                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has entered the school premises at {$nowTime}. - Smart Attendance. Please do not reply to this automated message."
                             );
                         }
 
@@ -370,9 +370,9 @@ class AttendanceController extends Controller
                         $att->save();
 
                         if (!empty($student->parent_contact)) {
-                            $twilio->sendSms(
+                            $textbee->sendSms(
                                 $student->parent_contact,
-                                "{$student->full_name} has exited at {$att->time_out}."
+                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has exited the school premises at {$att->time_out}. - Smart Attendance. Please do not reply to this automated message."
                             );
                         }
 
@@ -387,7 +387,6 @@ class AttendanceController extends Controller
             return $result;
         }
 
-
         // C) MANUAL CREATE
         $data = $request->validate([
             'type'       => ['required', Rule::in(['class', 'entry'])],
@@ -400,7 +399,6 @@ class AttendanceController extends Controller
             'note'       => ['nullable', 'string', 'max:255'],
         ]);
 
-        // Auto-set status if missing but we have time_in
         if (($data['type'] ?? null) === 'class' && !empty($data['class_id']) && !empty($data['time_in']) && empty($data['status'])) {
             $class = SchoolClass::find($data['class_id']);
             $data['status'] = $this->computeStatusForTimeIn($class, $data['log_date'], $data['time_in'], 5);
@@ -417,9 +415,10 @@ class AttendanceController extends Controller
     }
 
     /** PUT/PATCH /api/attendances/{attendance} */
-    public function update(Request $request, Attendance $attendance)
+    /** PUT/PATCH /api/attendances/{attendance} */
+    public function update(Request $request, Attendance $attendance, TextBeeService $textbee)
     {
-        // Validate incoming fields (seconds included to match scan flow)
+        // Validate incoming fields
         $data = $request->validate([
             'class_id' => ['sometimes', 'nullable', 'integer', 'exists:classes,id'],
             'student_id' => ['sometimes', 'nullable', 'integer', 'exists:students,id'],
@@ -428,45 +427,61 @@ class AttendanceController extends Controller
             'time_in'  => ['sometimes', 'nullable', 'date_format:H:i:s'],
             'time_out' => ['sometimes', 'nullable', 'date_format:H:i:s', 'after_or_equal:time_in'],
             'note'     => ['sometimes', 'nullable', 'string', 'max:255'],
-
             'expected_time_in' => ['nullable', 'string'], // optional override
         ]);
 
-        // Apply changes first (but not saved yet)
         $att = clone $attendance;
         foreach ($data as $k => $v) {
             $att->{$k} = $v;
         }
 
-        // Check if client explicitly sent a status
         $clientSentStatus = array_key_exists('status', $data);
-
         $isClassType = ($att->type ?? $attendance->type) === 'class';
         $classId = $att->class_id ?? $attendance->class_id;
         $timeIn  = $att->time_in ?? $attendance->time_in;
+        $timeOut = $att->time_out ?? $attendance->time_out;
         $logDate = $att->log_date ?? $attendance->log_date;
-
-        // Grab expected_time_in override if present
         $expectedOverride = $data['expected_time_in'] ?? null;
 
+        // Recompute status for class-type if needed
         if ($isClassType && $classId && $timeIn && !$clientSentStatus) {
             $class = SchoolClass::find($classId);
-
-            // Pass the override to computeStatusForTimeIn
-            $att->status = $this->computeStatusForTimeIn(
-                $class,
-                $logDate,
-                $timeIn,
-                5,
-                $expectedOverride
-            );
+            $att->status = $this->computeStatusForTimeIn($class, $logDate, $timeIn, 5, $expectedOverride);
         }
 
-        // Persist
-        $attendance->update($att->getAttributes());
+        $oldTimeIn  = $attendance->time_in;
+        $oldTimeOut = $attendance->time_out;
+        $oldStatus  = $attendance->status;
 
-        return $attendance->fresh()->load('student:id,full_name,barcode');
+        $attendance->update($att->getAttributes());
+        $attendance = $attendance->fresh()->load('student:id,full_name,barcode,parent_contact');
+
+        // Send SMS notifications if parent contact exists
+        $studentContact = $attendance->student?->parent_contact;
+        if (!empty($studentContact)) {
+            $messages = [];
+
+            if (!empty($timeIn) && $timeIn !== $oldTimeIn) {
+                $messages[] = "Dear Mr./Mrs. {$attendance->student->last_name}, {$attendance->student->full_name} has recorded a time-in at {$timeIn}. Status: {$attendance->status}. - Smart Attendance. Please do not reply to this automated message.";
+            }
+
+            if (!empty($timeOut) && $timeOut !== $oldTimeOut) {
+                $messages[] = "Dear Mr./Mrs. {$attendance->student->last_name}, {$attendance->student->full_name} has recorded a time-out at {$timeOut}. - Smart Attendance. Please do not reply to this automated message.";
+            }
+
+            if (!empty($attendance->status) && $attendance->status !== $oldStatus && $timeIn) {
+                $messages[] = "Dear Mr./Mrs. {$attendance->student->last_name}, the attendance status of {$attendance->student->full_name} has been updated to {$attendance->status}. - Smart Attendance. Please do not reply to this automated message.";
+            }
+
+
+            foreach ($messages as $msg) {
+                $textbee->sendSms($studentContact, $msg);
+            }
+        }
+
+        return $attendance;
     }
+
 
 
     /** DELETE /api/attendances/{attendance} */
