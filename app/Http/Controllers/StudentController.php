@@ -2,12 +2,11 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Requests\StudentStoreRequest;
-use App\Http\Requests\StudentUpdateRequest;
 use App\Models\Student;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Validation\Rule;
 
 class StudentController extends Controller
 {
@@ -17,7 +16,7 @@ class StudentController extends Controller
         $q = $request->query('q');
         $user = $request->user();
 
-        $students = Student::query()
+        $students = Student::with('schoolClass') // eager load
             ->when($user->role === 'teacher', function ($builder) use ($user) {
                 $builder->whereHas('schoolClass', function ($q) use ($user) {
                     $q->where('teacher', $user->name);
@@ -27,9 +26,11 @@ class StudentController extends Controller
                 $builder->where(function ($w) use ($term) {
                     $w->where('barcode', 'like', "%{$term}%")
                         ->orWhere('full_name', 'like', "%{$term}%")
-                        ->orWhere('grade_level', 'like', "%{$term}%")
-                        ->orWhere('section', 'like', "%{$term}%")
-                        ->orWhere('parent_contact', 'like', "%{$term}%");
+                        ->orWhere('parent_contact', 'like', "%{$term}%")
+                        ->orWhereHas('schoolClass', function ($sc) use ($term) {
+                            $sc->where('grade_level', 'like', "%{$term}%")
+                                ->orWhere('section', 'like', "%{$term}%");
+                        });
                 });
             })
             ->latest('id')
@@ -39,22 +40,64 @@ class StudentController extends Controller
         return response()->json($students);
     }
 
-    public function store(StudentStoreRequest $request): JsonResponse
+
+    /**
+     * Store a newly created student.
+     */
+    public function store(Request $request)
     {
-        $student = Student::create($request->validated());
-        return response()->json($student, 201);
+        $validated = $request->validate([
+            'full_name'      => 'required|string|max:255',
+            'parent_contact' => 'required|string|max:255',
+            'class_id'       => 'required|exists:classes,id',
+        ]);
+
+        // Find the last student and generate the next barcode
+        $lastStudent = Student::orderBy('id', 'desc')->first();
+        $nextNumber = $lastStudent
+            ? ((int) substr($lastStudent->barcode, 4)) + 1
+            : 1;
+
+        $barcode = 'STU-' . str_pad($nextNumber, 6, '0', STR_PAD_LEFT);
+
+        // Merge barcode with validated data
+        $student = Student::create(array_merge($validated, [
+            'barcode' => $barcode,
+        ]));
+
+        return response()->json([
+            'message' => 'Student created successfully',
+            'data'    => $student->load('schoolClass'),
+        ], 201);
     }
 
-    public function show(Student $student): JsonResponse
+    /**
+     * Display the specified student.
+     */
+    public function show(Student $student)
     {
-        return response()->json($student);
+        return response()->json($student->load('schoolClass'));
     }
 
-    public function update(StudentUpdateRequest $request, Student $student): JsonResponse
+    /**
+     * Update the specified student.
+     */
+    public function update(Request $request, Student $student)
     {
-        $student->update($request->validated());
-        return response()->json($student);
+        $validated = $request->validate([
+            'full_name'      => 'required|string|max:255',
+            'parent_contact' => 'required|string|max:255',
+            'class_id'       => 'required|exists:classes,id',
+        ]);
+
+        $student->update($validated);
+
+        return response()->json([
+            'message' => 'Student updated successfully',
+            'data'    => $student->load('schoolClass'),
+        ]);
     }
+
 
     public function destroy(Student $student): Response
     {

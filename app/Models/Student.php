@@ -17,8 +17,6 @@ class Student extends Model
     protected $fillable = [
         'barcode',
         'full_name',
-        'grade_level',
-        'section',
         'parent_contact',
         'class_id',
     ];

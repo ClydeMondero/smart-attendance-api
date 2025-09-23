@@ -11,7 +11,6 @@ class ClassStudentSeeder extends Seeder
 {
     public function run(): void
     {
-        // data set
         $classes = [
             [
                 'grade_level' => 'Grade 1',
@@ -50,7 +49,6 @@ class ClassStudentSeeder extends Seeder
 
         DB::transaction(function () use ($classes) {
             foreach ($classes as $c) {
-                // Upsert class by unique tuple
                 $class = SchoolClass::updateOrCreate(
                     [
                         'grade_level' => $c['grade_level'],
@@ -64,13 +62,10 @@ class ClassStudentSeeder extends Seeder
                 );
 
                 foreach ($c['students'] as $s) {
-                    // Upsert student by unique barcode
                     Student::updateOrCreate(
                         ['barcode' => $s['barcode']], // unique key
                         [
                             'full_name'      => $s['full_name'],
-                            'grade_level'    => $c['grade_level'],
-                            'section'        => $c['section'],
                             'parent_contact' => $s['parent_contact'],
                             'class_id'       => $class->id,
                         ]
