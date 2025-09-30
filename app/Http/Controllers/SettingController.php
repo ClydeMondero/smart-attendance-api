@@ -52,15 +52,20 @@ class SettingController extends Controller
      */
     public function update(Request $request, string $id)
     {
-        $request->validate([
-            'allow_grades' => 'required|boolean'
+        $validated = $request->validate([
+            'allow_grades'        => 'sometimes|boolean',
+            'school_in_template'  => 'sometimes|string',
+            'school_out_template' => 'sometimes|string',
+            'class_in_template'   => 'sometimes|string',
+            'class_out_template'  => 'sometimes|string',
         ]);
 
-        $setting = Setting::first();
-        $setting->update(['allow_grades' => $request->allow_grades]);
+        $setting = Setting::findOrFail($id);
+        $setting->update($validated);
 
         return response()->json($setting);
     }
+
 
     /**
      * Remove the specified resource from storage.

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Attendance;
 use App\Models\SchoolClass;
 use App\Models\Student;
+use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -230,7 +231,10 @@ class AttendanceController extends Controller
             $type = $data['type'] ?? (!empty($data['class_id']) ? 'class' : 'entry');
             $providedExpected = $data['expected_time_in'] ?? null;
 
-            $student = Student::where('barcode', $data['barcode'])->first();
+            $student = Student::with([
+                'schoolClass:id,grade_level,section'
+            ])->where('barcode', $data['barcode'])->first();
+
             if (!$student) {
                 return response()->json(['ok' => false, 'message' => 'Student not found'], 404);
             }
@@ -241,6 +245,7 @@ class AttendanceController extends Controller
 
             DB::transaction(function () use (&$result, $data, $student, $date, $MIN_GAP_SECONDS, $providedExpected, $type, $textbee) {
                 $nowTime = now()->format('H:i:s');
+                $nowTimeDate = now()->format('g:i A F j, Y');
 
                 if ($type === 'class') {
                     $att = Attendance::where([
@@ -265,12 +270,27 @@ class AttendanceController extends Controller
                             'time_in'    => $nowTime,
                         ]);
 
+                        $template = Setting::first()->class_in_template;
+
+                        $values = [
+                            '{{student_parent_name}}' => $student->parent_name,
+                            '{{student_full_name}}' => $student->full_name,
+                            '{{time_in}}' => $nowTimeDate,
+                        ];
+
+                        $message = str_replace(array_keys($values), array_values($values), $template);
+
                         $textbee->sendSms(
                             $student->parent_contact,
-                            "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has recorded a time-in at {$nowTime}. Status: {$status}. - Smart Attendance. Please do not reply to this automated message."
+                            $message
                         );
 
-                        $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $status];
+                        $result = [
+                            'ok'      => true,
+                            'action'  => 'time_in',
+                            'student' => $student,
+                            'status'  => $status,
+                        ];
                         return;
                     }
 
@@ -280,17 +300,31 @@ class AttendanceController extends Controller
                         $att->status  = $this->computeStatusForTimeIn($class, $att->log_date ?? $date, $nowTime, 5, $providedExpected);
                         $att->save();
 
-                        if (!empty($student->parent_contact)) {
-                            $textbee->sendSms(
-                                $student->parent_contact,
-                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has recorded a time-in at {$nowTime}. Status: {$att->status}. - Smart Attendance. Please do not reply to this automated message."
-                            );
-                        }
+                        $template = Setting::first()->class_in_template;
 
-                        $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => $att->status];
+                        $values = [
+                            '{{student_parent_name}}' => $student->parent_name,
+                            '{{student_full_name}}' => $student->full_name,
+                            '{{time_in}}' => $nowTimeDate,
+                        ];
+
+                        $message = str_replace(array_keys($values), array_values($values), $template);
+
+                        $textbee->sendSms(
+                            $student->parent_contact,
+                            $message
+                        );
+
+                        $result = [
+                            'ok'      => true,
+                            'action'  => 'time_in',
+                            'student' => $student,
+                            'status'  => $att->status,
+                        ];
                         return;
                     }
 
+                    //TODO: Remove
                     // TIME OUT if missing
                     if (!$att->time_out) {
                         $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
@@ -300,7 +334,7 @@ class AttendanceController extends Controller
                             $result = [
                                 'ok'      => true,
                                 'action'  => 'noop_cooldown',
-                                'student' => $student->full_name,
+                                'student' => $student,
                                 'message' => "Please wait at least {$MIN_GAP_SECONDS}s before timing out.",
                             ];
                             return;
@@ -309,18 +343,11 @@ class AttendanceController extends Controller
                         $att->time_out = $now->format('H:i:s');
                         $att->save();
 
-                        if (!empty($student->parent_contact)) {
-                            $textbee->sendSms(
-                                $student->parent_contact,
-                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has recorded a time-out at {$att->time_out}. - Smart Attendance. Please do not reply to this automated message."
-                            );
-                        }
-
-                        $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
+                        $result = ['ok' => true, 'action' => 'time_out', 'student' => $student];
                         return;
                     }
 
-                    $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student->full_name];
+                    $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student];
                 }
 
                 // ENTRY type
@@ -340,12 +367,20 @@ class AttendanceController extends Controller
                             'time_in'    => $nowTime,
                         ]);
 
-                        if (!empty($student->parent_contact)) {
-                            $textbee->sendSms(
-                                $student->parent_contact,
-                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has entered the school premises at {$nowTime}. - Smart Attendance. Please do not reply to this automated message."
-                            );
-                        }
+                        $template = Setting::first()->school_in_template;
+
+                        $values = [
+                            '{{student_parent_name}}' => $student->parent_name,
+                            '{{student_full_name}}' => $student->full_name,
+                            '{{time_in}}' => $nowTimeDate,
+                        ];
+
+                        $message = str_replace(array_keys($values), array_values($values), $template);
+
+                        $textbee->sendSms(
+                            $student->parent_contact,
+                            $message
+                        );
 
                         $result = ['ok' => true, 'action' => 'time_in', 'student' => $student->full_name, 'status' => 'in'];
                         return;
@@ -369,12 +404,20 @@ class AttendanceController extends Controller
                         $att->status   = 'out';
                         $att->save();
 
-                        if (!empty($student->parent_contact)) {
-                            $textbee->sendSms(
-                                $student->parent_contact,
-                                "Dear Mr./Mrs. {$student->last_name}, {$student->full_name} has exited the school premises at {$att->time_out}. - Smart Attendance. Please do not reply to this automated message."
-                            );
-                        }
+                        $template = Setting::first()->school_out_template;
+
+                        $values = [
+                            '{{student_parent_name}}' => $student->parent_name,
+                            '{{student_full_name}}' => $student->full_name,
+                            '{{time_out}}' => $nowTimeDate,
+                        ];
+
+                        $message = str_replace(array_keys($values), array_values($values), $template);
+
+                        $textbee->sendSms(
+                            $student->parent_contact,
+                            $message
+                        );
 
                         $result = ['ok' => true, 'action' => 'time_out', 'student' => $student->full_name];
                         return;
@@ -414,7 +457,6 @@ class AttendanceController extends Controller
         return $attendance->load(['student:id,full_name,barcode', 'schoolClass:id,grade_level,section']);
     }
 
-    /** PUT/PATCH /api/attendances/{attendance} */
     /** PUT/PATCH /api/attendances/{attendance} */
     public function update(Request $request, Attendance $attendance, TextBeeService $textbee)
     {

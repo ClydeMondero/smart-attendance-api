@@ -18,6 +18,7 @@ class Student extends Model
         'barcode',
         'full_name',
         'parent_contact',
+        'parent_name',
         'class_id',
     ];
 

@@ -19,8 +19,8 @@ class ClassStudentSeeder extends Seeder
                 'school_year' => '2024-2025',
                 'status'      => 'active',
                 'students'    => [
-                    ['barcode' => 'STU-000001', 'full_name' => 'John Doe',   'parent_contact' => '09171234567'],
-                    ['barcode' => 'STU-000002', 'full_name' => 'Jane Smith', 'parent_contact' => '09179876543'],
+                    ['barcode' => 'STU-000001', 'full_name' => 'John Doe', 'parent_contact' => '09171234567', 'parent_name' => 'John Doe Sr.'],
+                    ['barcode' => 'STU-000002', 'full_name' => 'Jane Smith', 'parent_contact' => '09179876543', 'parent_name' => 'Jane Doe'],
                 ],
             ],
             [
@@ -30,8 +30,8 @@ class ClassStudentSeeder extends Seeder
                 'school_year' => '2024-2025',
                 'status'      => 'active',
                 'students'    => [
-                    ['barcode' => 'STU-000003', 'full_name' => 'Carlos Reyes', 'parent_contact' => '09175678901'],
-                    ['barcode' => 'STU-000004', 'full_name' => 'Maria Cruz',   'parent_contact' => '09172345678'],
+                    ['barcode' => 'STU-000003', 'full_name' => 'Carlos Reyes', 'parent_contact' => '09175678901', 'parent_name' => 'Carlos Reyes Sr.'],
+                    ['barcode' => 'STU-000004', 'full_name' => 'Maria Cruz', 'parent_contact' => '09172345678', 'parent_name' => 'Maria Cruz'],
                 ],
             ],
             [
@@ -41,8 +41,8 @@ class ClassStudentSeeder extends Seeder
                 'school_year' => '2023-2024',
                 'status'      => 'inactive',
                 'students'    => [
-                    ['barcode' => 'STU-000005', 'full_name' => 'David Lim',  'parent_contact' => '09173456789'],
-                    ['barcode' => 'STU-000006', 'full_name' => 'Angela Tan', 'parent_contact' => '09205557890'],
+                    ['barcode' => 'STU-000005', 'full_name' => 'David Lim', 'parent_contact' => '09173456789', 'parent_name' => 'David Lim Sr.'],
+                    ['barcode' => 'STU-000006', 'full_name' => 'Angela Tan', 'parent_contact' => '09205557890', 'parent_name' => 'Angela Tan'],
                 ],
             ],
         ];
@@ -67,6 +67,7 @@ class ClassStudentSeeder extends Seeder
                         [
                             'full_name'      => $s['full_name'],
                             'parent_contact' => $s['parent_contact'],
+                            'parent_name'     => $s['parent_name'],
                             'class_id'       => $class->id,
                         ]
                     );
