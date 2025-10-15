@@ -39,7 +39,7 @@ class AuthController extends Controller
         $request->validate([
             'email'    => 'required|email',
             'password' => 'required',
-            'is_mobile' => "sometimes|boolean"
+            'is_mobile' => "sometimes|boolean|default:false"
         ]);
 
         $user = User::where('email', $request->email)->first();
@@ -47,6 +47,12 @@ class AuthController extends Controller
         if (! $user || ! Hash::check($request->password, $user->password)) {
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials are incorrect.'],
+            ]);
+        }
+
+        if (!$request->is_mobile && $user->role === 'operator') {
+            throw ValidationException::withMessages([
+                'email' => ['Operator login is only allowed from mobile devices.'],
             ]);
         }
 
