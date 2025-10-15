@@ -44,6 +44,7 @@ Route::middleware('auth:sanctum')->group(function () {
     //  admin-only resource
     Route::middleware('role:admin')->group(function () {
 
+        Route::get('/users/teachers', [UserController::class, 'getTeachers']);
         Route::put('/users/{user}/status', [UserController::class, 'toggleStatus']);
         Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword']);
         Route::post('/reset-password', [UserController::class, 'handleReset']);

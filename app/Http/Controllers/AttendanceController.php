@@ -157,7 +157,8 @@ class AttendanceController extends Controller
 
         // Compact table shape for ClassAttendanceLog page
         if ($request->type === 'class' && $request->filled(['class_id', 'date'])) {
-            $rows = $q->orderByRaw('COALESCE(time_in, "99:99:99") asc')
+            $rows = $q->whereHas('student', fn($s) => $s->where('is_active', 1))
+                ->orderByRaw('COALESCE(time_in, "99:99:99") asc')
                 ->get()
                 ->map(function (Attendance $a) use ($request) {
                     return [
@@ -201,7 +202,9 @@ class AttendanceController extends Controller
 
             DB::transaction(function () use ($data) {
                 $class = SchoolClass::findOrFail($data['class_id']);
-                $studentIds = $class->students()->pluck('id');
+                $studentIds = $class->students()
+                    ->where('is_active', 1)
+                    ->pluck('id');
                 foreach ($studentIds as $sid) {
                     Attendance::firstOrCreate(
                         [
@@ -429,6 +432,48 @@ class AttendanceController extends Controller
 
             return $result;
         }
+
+        if ($action === 'stop') {
+            $data = $request->validate([
+                'class_id' => ['required', 'integer', 'exists:classes,id'],
+                'date'     => ['required', 'date'],
+            ]);
+
+            $absents = Attendance::with('student')
+                ->where('class_id', $data['class_id'])
+                ->where('log_date', $data['date'])
+                ->where('status', 'absent')
+                ->whereHas('student', fn($q) => $q->where('is_active', 1))
+                ->get();
+
+            $template = Setting::first()->class_absent_template;
+
+            foreach ($absents as $att) {
+                $student = $att->student;
+                if (!$student || !$student->is_active) continue;
+
+                $values = [
+                    '{{student_parent_name}}' => $student->parent_name,
+                    '{{student_full_name}}'   => $student->full_name,
+                    '{{date}}'                => $data['date'],
+                ];
+
+                $message = str_replace(array_keys($values), array_values($values), $template);
+
+                $textbee->sendSms(
+                    $student->parent_contact,
+                    $message
+                );
+            }
+
+            return response()->json([
+                'ok' => true,
+                'action' => 'stop',
+                'sent_count' => count($absents),
+            ]);
+        }
+
+
 
         // C) MANUAL CREATE
         $data = $request->validate([

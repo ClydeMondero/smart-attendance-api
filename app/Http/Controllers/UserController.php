@@ -124,4 +124,9 @@ class UserController extends Controller
             ? response()->json(['message' => __($status)])
             : response()->json(['message' => __($status)], 400);
     }
+
+    public function getTeachers()
+    {
+        return User::where('role', 'teacher')->get();
+    }
 }
