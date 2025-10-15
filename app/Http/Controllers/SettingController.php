@@ -58,6 +58,7 @@ class SettingController extends Controller
             'school_out_template' => 'sometimes|string',
             'class_in_template'   => 'sometimes|string',
             'class_out_template'  => 'sometimes|string',
+            "class_absent_template" => "sometimes|string"
         ]);
 
         $setting = Setting::findOrFail($id);
