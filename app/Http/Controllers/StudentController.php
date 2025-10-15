@@ -48,6 +48,7 @@ class StudentController extends Controller
     {
         $validated = $request->validate([
             'full_name'      => 'required|string|max:255',
+            'parent_name'    => 'required|string|max:255',
             'parent_contact' => 'required|string|max:255',
             'class_id'       => 'required|exists:classes,id',
         ]);
@@ -101,7 +102,7 @@ class StudentController extends Controller
 
     public function destroy(Student $student): Response
     {
-        $student->delete();
+        $student->update(["is_active" => 0]);
         return response()->noContent();
     }
 }

@@ -20,6 +20,7 @@ class Student extends Model
         'parent_contact',
         'parent_name',
         'class_id',
+        'is_active'
     ];
 
 

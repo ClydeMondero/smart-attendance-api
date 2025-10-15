@@ -20,11 +20,11 @@ class DashboardController extends Controller
         $totalStudents = Student::count();
         $totalClasses = SchoolClass::count();
 
-        $present = Attendance::whereDate('created_at', $today)
+        $present = Attendance::whereDate('log_date', $today)
             ->where('status', 'present')
             ->count();
 
-        $late = Attendance::whereDate('created_at', $today)
+        $late = Attendance::whereDate('log_date', $today)
             ->where('status', 'late')
             ->count();
 
@@ -47,11 +47,11 @@ class DashboardController extends Controller
         $startDate = Carbon::today()->subDays($days - 1);
 
         $records = Attendance::select(
-            DB::raw('DATE(created_at) as day'),
+            DB::raw('DATE(log_date) as day'),
             'status',
             DB::raw('COUNT(*) as total')
         )
-            ->whereDate('created_at', '>=', $startDate)
+            ->whereDate('log_date', '>=', $startDate)
             ->groupBy('day', 'status')
             ->orderBy('day')
             ->get();
@@ -85,7 +85,7 @@ class DashboardController extends Controller
                 $q->whereHas(
                     'attendances',
                     fn($a) =>
-                    $a->whereDate('created_at', $date)
+                    $a->whereDate('log_date', $date)
                         ->where('status', 'present')
                 );
             },
@@ -93,14 +93,14 @@ class DashboardController extends Controller
                 $q->whereDoesntHave(
                     'attendances',
                     fn($a) =>
-                    $a->whereDate('created_at', $date)
+                    $a->whereDate('log_date', $date)
                 );
             },
             'students as late' => function ($q) use ($date) {
                 $q->whereHas(
                     'attendances',
                     fn($a) =>
-                    $a->whereDate('created_at', $date)
+                    $a->whereDate('log_date', $date)
                         ->where('status', 'late')
                 );
             },
@@ -117,7 +117,7 @@ class DashboardController extends Controller
             'student:id,full_name,barcode,class_id',
             'student.schoolClass:id,grade_level,section',
         ])
-            ->latest('created_at')
+            ->latest('log_date')
             ->take($limit)
             ->get()
             ->map(function ($att) {
