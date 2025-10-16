@@ -9,6 +9,10 @@ use App\Http\Controllers\StudentController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\SubjectController;
 use App\Http\Controllers\GradeController;
+use App\Models\SchoolClass;
+use App\Models\Student;
+use App\Services\TextBeeService;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::apiResource('/settings', SettingController::class);
@@ -28,6 +32,32 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('subjects', SubjectController::class);
     Route::apiResource('grades', GradeController::class);
 
+    Route::post('announcement', function (Request $request, TextBeeService $textbee) {
+        // Validate request
+        $validated = $request->validate([
+            'class_id' => 'nullable|integer|exists:classes,id',
+            'message' => 'required|string',
+        ]);
+
+        // Collect active students
+        if (isset($validated['class_id'])) {
+            $class = SchoolClass::findOrFail($validated['class_id']);
+            $students = $class->students()->where('is_active', 1)->get();
+        } else {
+            $students = Student::where('is_active', 1)->get();
+        }
+
+        // Send SMS
+        $students->each(function ($student) use ($validated, $textbee) {
+            $textbee->sendSms($student->parent_contact, $validated['message']);
+        });
+
+        // Return the students for testing
+        return response()->json([
+            'count' => $students->count(),
+            'students' => $students
+        ]);
+    });
 
     Route::prefix('dashboard')->group(function () {
         Route::get('/summary', [DashboardController::class, 'summary']);
