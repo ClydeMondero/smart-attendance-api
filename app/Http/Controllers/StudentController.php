@@ -6,7 +6,8 @@ use App\Models\Student;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
-use Illuminate\Validation\Rule;
+use Cloudinary\Configuration\Configuration;
+use Cloudinary\Api\Upload\UploadApi;
 
 class StudentController extends Controller
 {
@@ -46,11 +47,15 @@ class StudentController extends Controller
      */
     public function store(Request $request)
     {
+
+        Configuration::instance(env('CLOUDINARY_URL'));
+
         $validated = $request->validate([
             'full_name'      => 'required|string|max:255',
             'parent_name'    => 'required|string|max:255',
             'parent_contact' => 'required|string|max:255',
             'class_id'       => 'required|exists:classes,id',
+            'photo' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
 
         // Find the last student and generate the next barcode
@@ -61,9 +66,25 @@ class StudentController extends Controller
 
         $barcode = 'STU-' . str_pad($nextNumber, 6, '0', STR_PAD_LEFT);
 
+
+
+        $file = $request->file('photo');
+        $photoUrl = null;
+
+        // Upload photo
+        if ($file) {
+            $upload = new UploadApi();
+            $result = $upload->upload($file->getRealPath(), [
+                'folder' => 'student',
+                'public_id' => $barcode,
+            ]);
+            $photoUrl = $result['secure_url'];
+        }
+
         // Merge barcode with validated data
         $student = Student::create(array_merge($validated, [
             'barcode' => $barcode,
+            'photo_url' => $photoUrl,
         ]));
 
         return response()->json([
@@ -85,11 +106,28 @@ class StudentController extends Controller
      */
     public function update(Request $request, Student $student)
     {
+        Configuration::instance(env('CLOUDINARY_URL'));
+
         $validated = $request->validate([
             'full_name'      => 'required|string|max:255',
+            'parent_name'    => 'required|string|max:255',
             'parent_contact' => 'required|string|max:255',
             'class_id'       => 'required|exists:classes,id',
+            'photo'          => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
         ]);
+
+        if ($request->hasFile('photo')) {
+            $file = $request->file('photo');
+            $upload = new UploadApi();
+            $result = $upload->upload($file->getRealPath(), [
+                'folder' => 'student',
+                'public_id' => $student->barcode,
+                'overwrite' => true,
+            ]);
+            $validated['photo_url'] = $result['secure_url'];
+        }
+
+        unset($validated['photo']);
 
         $student->update($validated);
 
@@ -98,6 +136,8 @@ class StudentController extends Controller
             'data'    => $student->load('schoolClass'),
         ]);
     }
+
+
 
 
     public function destroy(Student $student): Response
