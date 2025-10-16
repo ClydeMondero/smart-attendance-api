@@ -6,6 +6,7 @@ use App\Models\Attendance;
 use App\Models\SchoolClass;
 use App\Models\Student;
 use App\Models\Setting;
+use App\Models\Subject;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -134,6 +135,12 @@ class AttendanceController extends Controller
                 // filter by student's class_id (since attendances table may have null class_id)
                 $x->whereHas('student', fn($s) => $s->where('class_id', $cid));
             })
+            ->when(
+                $request->subject_id,
+                fn($x, $sid) =>
+                $x->where('subject_id', $sid)
+            )
+
             ->when($request->section, function ($x, $sec) {
                 // filter by related schoolClass.section
                 $x->whereHas('student.schoolClass', fn($sc) => $sc->where('section', $sec));
@@ -173,6 +180,24 @@ class AttendanceController extends Controller
             return ['data' => $rows];
         }
 
+        if ($request->type === 'subject' && $request->filled(['subject_id', 'date'])) {
+            $rows = $q->whereHas('student', fn($s) => $s->where('is_active', 1))
+                ->orderByRaw('COALESCE(time_in, "99:99:99") asc')
+                ->get()
+                ->map(function (Attendance $a) use ($request) {
+                    return [
+                        'id'          => (string) $a->id,
+                        'studentName' => $a->student?->full_name ?? '—',
+                        'status'      => ucfirst($a->status ?? 'absent'),
+                        'timeIn'      => $a->time_in ?: '-',
+                        'timeOut'     => $a->time_out ?: '-',
+                        'date'        => $this->toDateString($request->date),
+                    ];
+                });
+            return ['data' => $rows];
+        }
+
+
         // Generic paginated result
         return $q->latest('id')->paginate((int)$request->input('per_page', 15))->withQueryString();
     }
@@ -198,25 +223,44 @@ class AttendanceController extends Controller
             $data = $request->validate([
                 'class_id' => ['required', 'integer', 'exists:classes,id'],
                 'date'     => ['required', 'date'],
+                'subject_id' => ['nullable', 'integer', 'exists:subjects,id'],
             ]);
 
-            DB::transaction(function () use ($data) {
-                $class = SchoolClass::findOrFail($data['class_id']);
-                $studentIds = $class->students()
-                    ->where('is_active', 1)
-                    ->pluck('id');
-                foreach ($studentIds as $sid) {
+            if (!empty($data['subject_id'])) {
+                $subject = Subject::with('schoolClass.students')->findOrFail($data['subject_id']);
+                foreach ($subject->schoolClass->students as $student) {
                     Attendance::firstOrCreate(
                         [
-                            'type'       => 'class',
-                            'class_id'   => $class->id,
-                            'student_id' => $sid,
+                            'type'       => 'subject',
+                            'subject_id' => $subject->id,
+                            'student_id' => $student->id,
                             'log_date'   => $data['date'],
                         ],
                         ['status' => 'absent']
                     );
                 }
-            });
+            } else {
+                DB::transaction(function () use ($data) {
+                    $class = SchoolClass::findOrFail($data['class_id']);
+                    $studentIds = $class->students()
+                        ->where('is_active', 1)
+                        ->pluck('id');
+                    foreach ($studentIds as $sid) {
+                        Attendance::firstOrCreate(
+                            [
+                                'type'       => 'class',
+                                'class_id'   => $class->id,
+                                'student_id' => $sid,
+                                'log_date'   => $data['date'],
+                            ],
+                            ['status' => 'absent']
+                        );
+                    }
+                });
+            }
+
+
+
 
             return response()->json(['ok' => true, 'action' => 'start'], 201);
         }
@@ -225,13 +269,17 @@ class AttendanceController extends Controller
         if ($action === 'scan') {
             $data = $request->validate([
                 'class_id'         => ['nullable', 'integer', 'exists:classes,id'],
+                'subject_id' => ['nullable', 'integer', 'exists:subjects,id'],
                 'barcode'          => ['required', 'string'],
                 'date'             => ['nullable', 'date'],
                 'expected_time_in' => ['nullable', 'string'],
-                'type'             => ['nullable', Rule::in(['class', 'entry'])],
+                'type' => ['nullable', Rule::in(['class', 'subject', 'entry'])],
             ]);
 
-            $type = $data['type'] ?? (!empty($data['class_id']) ? 'class' : 'entry');
+            $type = $data['type']
+                ?? (!empty($data['subject_id']) ? 'subject'
+                    : (!empty($data['class_id']) ? 'class' : 'entry'));
+
             $providedExpected = $data['expected_time_in'] ?? null;
 
             $student = Student::with([
@@ -327,30 +375,66 @@ class AttendanceController extends Controller
                         return;
                     }
 
-                    //TODO: Remove
-                    // TIME OUT if missing
-                    if (!$att->time_out) {
-                        $inAt = $this->combineDateAndTime($att->log_date ?? $date, $att->time_in);
-                        $now  = now();
+                    $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student];
+                }
 
-                        if ($inAt->diffInSeconds($now) < $MIN_GAP_SECONDS) {
-                            $result = [
-                                'ok'      => true,
-                                'action'  => 'noop_cooldown',
-                                'student' => $student,
-                                'message' => "Please wait at least {$MIN_GAP_SECONDS}s before timing out.",
-                            ];
-                            return;
+                if ($type === 'subject') {
+                    $att = Attendance::where([
+                        'type'       => 'subject',
+                        'subject_id' => $data['subject_id'],
+                        'student_id' => $student->id,
+                        'log_date'   => $date,
+                    ])->lockForUpdate()->first();
+
+                    $subject = Subject::findOrFail($data['subject_id']);
+
+                    $status = $this->computeStatusForTimeIn(
+                        $subject->schoolClass,
+                        $date,
+                        $nowTime,
+                        5,
+                        $subject->expected_time_in ?? $subject->schoolClass->expected_time_in
+                    );
+
+
+                    if (!$att) {
+                        // First scan → create
+                        $att = Attendance::create([
+                            'type'       => 'subject',
+                            'subject_id' => $subject->id,
+                            'student_id' => $student->id,
+                            'log_date'   => $date,
+                            'status'     => $status,
+                            'time_in'    => $nowTime,
+                        ]);
+                    } else {
+                        // Update existing row (created as absent during start)
+                        if (!$att->time_in) {
+                            $att->time_in = $nowTime;
                         }
-
-                        $att->time_out = $now->format('H:i:s');
+                        $att->status = $status; // overwrite 'absent'
                         $att->save();
-
-                        $result = ['ok' => true, 'action' => 'time_out', 'student' => $student];
-                        return;
                     }
 
-                    $result = ['ok' => true, 'action' => 'noop_done', 'student' => $student];
+
+                    // send SMS (in/out template) same as your class logic...
+                    $template = Setting::first()->subject_in_template;
+                    $values = [
+                        '{{student_parent_name}}' => $student->parent_name,
+                        '{{student_full_name}}'   => $student->full_name,
+                        '{{subject_name}}'        => $subject->name,
+                        '{{time_in}}'             => $nowTimeDate,
+                    ];
+                    $message = str_replace(array_keys($values), array_values($values), $template);
+                    $textbee->sendSms($student->parent_contact, $message);
+
+                    $result = [
+                        'ok'      => true,
+                        'action'  => 'time_in',
+                        'student' => $student,
+                        'status'  => $att->status,
+                    ];
+                    return;
                 }
 
                 // ENTRY type
@@ -436,17 +520,60 @@ class AttendanceController extends Controller
         if ($action === 'stop') {
             $data = $request->validate([
                 'class_id' => ['required', 'integer', 'exists:classes,id'],
+                'subject_id' => ['nullable', 'integer', 'exists:subjects,id'],
                 'date'     => ['required', 'date'],
             ]);
 
-            $absents = Attendance::with('student')
-                ->where('class_id', $data['class_id'])
-                ->where('log_date', $data['date'])
-                ->where('status', 'absent')
-                ->whereHas('student', fn($q) => $q->where('is_active', 1))
-                ->get();
+            if (!empty($data['subject_id'])) {
+                $absents = Attendance::with('student')
+                    ->where('subject_id', $data['subject_id'])
+                    ->where('log_date', $data['date'])
+                    ->where('status', 'absent')
+                    ->whereHas('student', fn($q) => $q->where('is_active', 1))
+                    ->get();
 
-            $template = Setting::first()->class_absent_template;
+                $template = Setting::first()->subject_absent_template;
+
+                foreach ($absents as $att) {
+                    $student = $att->student;
+                    if (!$student || !$student->is_active) continue;
+
+                    $values = [
+                        '{{student_parent_name}}' => $student->parent_name,
+                        '{{student_full_name}}'   => $student->full_name,
+                        '{{subject_name}}'        => $att->subject->name,
+                        '{{date}}'                => $data['date'],
+                    ];
+
+                    $message = str_replace(array_keys($values), array_values($values), $template);
+
+                    $textbee->sendSms($student->parent_contact, $message);
+                }
+            } else {
+                $absents = Attendance::with('student')
+                    ->where('class_id', $data['class_id'])
+                    ->where('log_date', $data['date'])
+                    ->where('status', 'absent')
+                    ->whereHas('student', fn($q) => $q->where('is_active', 1))
+                    ->get();
+
+                $template = Setting::first()->class_absent_template;
+
+                foreach ($absents as $att) {
+                    $student = $att->student;
+                    if (!$student || !$student->is_active) continue;
+
+                    $values = [
+                        '{{student_parent_name}}' => $student->parent_name,
+                        '{{student_full_name}}'   => $student->full_name,
+                        '{{date}}'                => $data['date'],
+                    ];
+
+                    $message = str_replace(array_keys($values), array_values($values), $template);
+
+                    $textbee->sendSms($student->parent_contact, $message);
+                }
+            }
 
             foreach ($absents as $att) {
                 $student = $att->student;
@@ -479,6 +606,7 @@ class AttendanceController extends Controller
         $data = $request->validate([
             'type'       => ['required', Rule::in(['class', 'entry'])],
             'class_id'   => ['nullable', 'integer', 'exists:classes,id'],
+            'subject_id' => ['nullable', 'integer', 'exists:subjects,id'],
             'student_id' => ['nullable', 'integer', 'exists:students,id'],
             'log_date'   => ['required', 'date'],
             'status'     => ['nullable', Rule::in(['present', 'late', 'absent', 'excused', 'in', 'out'])],

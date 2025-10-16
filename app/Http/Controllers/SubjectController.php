@@ -22,7 +22,6 @@ class SubjectController extends Controller
         return response()->json($query->get());
     }
 
-
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -36,6 +35,7 @@ class SubjectController extends Controller
             ],
             'class_id' => 'required|exists:classes,id',
             'status' => 'required|in:Active,Inactive',
+            'expected_time_in' => 'nullable|date_format:H:i',
         ], [
             'name.unique' => 'This subject already exists in the selected class.',
         ]);
@@ -65,6 +65,7 @@ class SubjectController extends Controller
             ],
             'class_id' => 'sometimes|exists:classes,id',
             'status' => 'sometimes|in:Active,Inactive',
+            'expected_time_in' => 'nullable|date_format:H:i',
         ], [
             'name.unique' => 'This subject already exists in the selected class.',
         ]);

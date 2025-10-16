@@ -10,6 +10,7 @@ class Attendance extends Model
         'type',        // 'class' | 'entry'
         'class_id',    // nullable for gate entry
         'student_id',  // nullable for gate entry
+        'subject_id',
         'log_date',
         'status',      // present|late|absent|excused|in|out
         'time_in',
@@ -27,8 +28,14 @@ class Attendance extends Model
     {
         return $this->belongsTo(\App\Models\Student::class);
     }
+
     public function schoolClass()
     {
         return $this->belongsTo(\App\Models\SchoolClass::class, 'class_id');
+    }
+
+    public function subject()
+    {
+        return $this->belongsTo(Subject::class);
     }
 }

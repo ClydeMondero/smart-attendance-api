@@ -39,7 +39,11 @@ class AuthController extends Controller
         $request->validate([
             'email'    => 'required|email',
             'password' => 'required',
-            'is_mobile' => "sometimes|boolean|default:false"
+            'is_mobile' => "sometimes|boolean"
+        ]);
+
+        $request->merge([
+            'is_mobile' => $request->input('is_mobile', false)
         ]);
 
         $user = User::where('email', $request->email)->first();

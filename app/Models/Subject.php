@@ -12,13 +12,19 @@ class Subject extends Model
     protected $fillable = [
         'name',
         'class_id',
-        'status'
+        'status',
+        'expected_time_in'
     ];
 
     /* ---------------- Relationships ---------------- */
     public function schoolClass()
     {
         return $this->belongsTo(SchoolClass::class, 'class_id');
+    }
+
+    public function attendances()
+    {
+        return $this->hasMany(Attendance::class);
     }
 
     public function grades()
