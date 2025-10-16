@@ -53,12 +53,14 @@ class SettingController extends Controller
     public function update(Request $request, string $id)
     {
         $validated = $request->validate([
-            'allow_grades'        => 'sometimes|boolean',
-            'school_in_template'  => 'sometimes|string',
-            'school_out_template' => 'sometimes|string',
-            'class_in_template'   => 'sometimes|string',
-            'class_out_template'  => 'sometimes|string',
-            "class_absent_template" => "sometimes|string"
+            'allow_grades'           => 'sometimes|boolean',
+            'school_in_template'     => 'sometimes|nullable|string',
+            'school_out_template'    => 'sometimes|nullable|string',
+            'class_in_template'      => 'sometimes|nullable|string',
+            'class_out_template'     => 'sometimes|nullable|string',
+            'class_absent_template'  => 'sometimes|nullable|string',
+            'subject_in_template'    => 'sometimes|nullable|string',
+            'subject_absent_template' => 'sometimes|nullable|string',
         ]);
 
         $setting = Setting::findOrFail($id);

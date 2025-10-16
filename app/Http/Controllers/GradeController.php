@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Grade;
+use App\Services\TextBeeService;
 use Illuminate\Http\Request;
 
 class GradeController extends Controller
@@ -23,7 +24,7 @@ class GradeController extends Controller
         return response()->json($query->get());
     }
 
-    public function store(Request $request)
+    public function store(Request $request, TextBeeService $textbee)
     {
         $validated = $request->validate([
             'student_id' => 'required|exists:students,id',
@@ -35,6 +36,11 @@ class GradeController extends Controller
 
         $grade = Grade::create($validated);
 
+        // Send SMS to parent
+        $student = $grade->student;
+        $message = "New grade recorded for {$student->full_name}: {$grade->score} in {$grade->subject->name} ({$grade->grading_period}). Remarks: {$grade->remarks}";
+        $textbee->sendSms($student->parent_contact, $message);
+
         return response()->json($grade, 201);
     }
 
@@ -43,7 +49,7 @@ class GradeController extends Controller
         return response()->json(Grade::with(['student', 'subject'])->findOrFail($id));
     }
 
-    public function update(Request $request, $id)
+    public function update(Request $request, $id, TextBeeService $textbee)
     {
         $grade = Grade::findOrFail($id);
 
@@ -56,6 +62,11 @@ class GradeController extends Controller
         ]);
 
         $grade->update($validated);
+
+        // Send SMS to parent
+        $student = $grade->student;
+        $message = "Grade updated for {$student->name}: {$grade->score} in {$grade->subject->name} ({$grade->grading_period}). Remarks: {$grade->remarks}";
+        $textbee->sendSms($student->parent_contact, $message);
 
         return response()->json($grade);
     }
