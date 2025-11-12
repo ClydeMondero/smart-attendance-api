@@ -17,7 +17,7 @@ class SchoolClass extends Model
         'teacher',
         'school_year',
         'status',
-        'expected_time_in'
+        'expected_time_in',
     ];
 
     /* ---------------- Relationships ---------------- */

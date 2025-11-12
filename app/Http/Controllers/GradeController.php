@@ -12,17 +12,21 @@ class GradeController extends Controller
     {
         $query = Grade::with(['student', 'subject']);
 
+        // Filter by student_id if provided
+        if ($request->has('student_id')) {
+            $query->where('student_id', $request->student_id);
+        }
+
+        // Filter for teacher
         if ($request->user()->role === 'teacher') {
-            $teacher = $request->user()->name;
-            $query->whereHas('subject.schoolClass', function ($q) use ($teacher) {
-                $q->where('teacher', $teacher);
-            })->whereHas('student.schoolClass', function ($q) use ($teacher) {
-                $q->where('teacher', $teacher);
-            });
+            $teacher = $request->user()->name; // or use id if stored
+            $query->whereHas('subject.schoolClass', fn($q) => $q->where('teacher', $teacher))
+                ->whereHas('student.schoolClass', fn($q) => $q->where('teacher', $teacher));
         }
 
         return response()->json($query->get());
     }
+
 
     public function store(Request $request, TextBeeService $textbee)
     {

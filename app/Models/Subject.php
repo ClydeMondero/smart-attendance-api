@@ -13,7 +13,8 @@ class Subject extends Model
         'name',
         'class_id',
         'status',
-        'expected_time_in'
+        'expected_time_in',
+        'expected_time_out',
     ];
 
     /* ---------------- Relationships ---------------- */
